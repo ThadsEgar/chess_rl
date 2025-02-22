@@ -1,0 +1,6 @@
+name: chess_rl
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+prefix: /Users/michael/anaconda3/envs/chess_rl
