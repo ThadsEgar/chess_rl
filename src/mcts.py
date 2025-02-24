@@ -197,6 +197,27 @@ class MCTSMaskableActorCriticPolicy(ActorCriticPolicy):
         self.training = mode
 
 class MCTSPPO(PPO):
+    def __init__(self, policy, env, **kwargs):
+        super().__init__(policy, env, **kwargs)
+        self.buffer_white = RolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs
+        )
+        self.buffer_black = RolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs
+        )
+
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         n_envs = env.num_envs
         self.buffer_white.reset()
@@ -209,27 +230,30 @@ class MCTSPPO(PPO):
         else:
             initial_obs = reset_output
             infos = [{}] * n_envs
-        if not hasattr(self, '_last_obs'):
-            self._last_obs = np.array(initial_obs)
-        else:
-            self._last_obs[:] = initial_obs
+        self._last_obs = np.array(initial_obs)
+        if self._last_obs.ndim == 1:
+            self._last_obs = np.expand_dims(self._last_obs, axis=0)
         self._last_episode_starts = np.ones(n_envs, dtype=bool)
 
         while np.sum(n_collected) < n_rollout_steps * n_envs:
             current_players = np.array([info.get("current_player", 0) for info in infos])
+
             with torch.no_grad():
                 obs_tensor = torch.FloatTensor(self._last_obs).to(self.device)
                 actions, _, _ = self.policy(obs_tensor)
                 actions = actions.cpu().numpy()
                 _, values, log_probs_full = self.policy(obs_tensor, return_logits=True)
                 actions_tensor = torch.LongTensor(actions).to(self.device).unsqueeze(1)
-                log_probs = torch.gather(torch.log_softmax(log_probs_full, dim=-1), 1, actions_tensor).flatten()
+                log_probs = torch.gather(
+                    torch.log_softmax(log_probs_full, dim=-1),
+                    1, actions_tensor
+                ).flatten()
                 log_probs = torch.clamp(log_probs, min=-10.0, max=0.0)
 
             step_result = env.step(actions)
             if len(step_result) == 4:
                 new_obs, rewards, dones, infos = step_result
-                truncated = np.zeros_like(dones)
+                truncated = np.zeros_like(dones, dtype=bool)
             else:
                 new_obs, rewards, dones, truncated, infos = step_result
 
@@ -240,6 +264,8 @@ class MCTSPPO(PPO):
             for player in [0, 1]:
                 player_indices = np.where(current_players == player)[0]
                 buffer = self.buffer_white if player == 0 else self.buffer_black
+
+                # Pad to n_envs
                 padded_obs = np.zeros_like(self._last_obs)
                 padded_actions = np.zeros((n_envs, 1), dtype=np.int64)
                 padded_rewards = np.zeros(n_envs, dtype=np.float32)
@@ -256,25 +282,38 @@ class MCTSPPO(PPO):
                     padded_log_probs[player_indices] = log_probs[player_indices]
                     n_collected[player_indices] += 1
 
-                buffer.add(padded_obs, padded_actions, padded_rewards, padded_episode_starts, padded_values, padded_log_probs)
+                buffer.add(
+                    padded_obs,
+                    padded_actions,
+                    padded_rewards,
+                    padded_episode_starts,
+                    padded_values,
+                    padded_log_probs
+                )
 
             self.num_timesteps += n_envs
-            self._last_obs[:] = new_obs
+            self._last_obs = np.array(new_obs)
+            if self._last_obs.ndim == 1:
+                self._last_obs = np.expand_dims(self._last_obs, axis=0)
             self._last_episode_starts = dones
 
             for e in range(n_envs):
                 if dones[e] or truncated[e]:
                     reset_individual = env.env_method("reset", indices=[e])[0]
-                    obs_e = reset_individual[0] if isinstance(reset_individual, tuple) else reset_individual
+                    if isinstance(reset_individual, tuple):
+                        obs_e = reset_individual[0]
+                    else:
+                        obs_e = reset_individual
                     obs_e = np.array(obs_e)
                     if obs_e.ndim == 1:
-                        obs_e = np.expand_dims(obs_e, 0)[0]
+                        obs_e = np.expand_dims(obs_e, axis=0)[0]
                     self._last_obs[e, :] = obs_e
 
         with torch.no_grad():
             last_values = self.policy.predict_values(torch.FloatTensor(self._last_obs).to(self.device))
         self.buffer_white.compute_returns_and_advantage(last_values=last_values, dones=dones)
         self.buffer_black.compute_returns_and_advantage(last_values=last_values, dones=dones)
+
         callback.on_rollout_end()
         return True
 
@@ -286,17 +325,28 @@ class MCTSPPO(PPO):
         white_generator = self.buffer_white.get(batch_size_per_buffer)
         black_generator = self.buffer_black.get(batch_size_per_buffer)
 
-        kl_sum = clip_sum = policy_sum = value_sum = entropy_sum = 0
-        count = 0
+        policy_losses = []
+        value_losses = []
+        entropy_losses = []
+        kl_divergences = []
+        clip_fractions = []
+        explained_variances = []
 
         for epoch in range(self.n_epochs):
             for white_batch, black_batch in zip(white_generator, black_generator):
-                obs_tensor = torch.cat([white_batch.observations, black_batch.observations], dim=0)
-                actions_tensor = torch.cat([white_batch.actions, black_batch.actions], dim=0)
-                returns_tensor = torch.cat([white_batch.returns, black_batch.returns], dim=0)
-                old_log_probs_tensor = torch.cat([white_batch.old_log_prob, black_batch.old_log_prob], dim=0)
-                old_values_tensor = torch.cat([white_batch.old_values, black_batch.old_values], dim=0)
-                advantages_tensor = torch.cat([white_batch.advantages, black_batch.advantages], dim=0)
+                obs = np.concatenate([white_batch.observations.cpu().numpy(), black_batch.observations.cpu().numpy()], axis=0)
+                actions = np.concatenate([white_batch.actions.cpu().numpy(), black_batch.actions.cpu().numpy()], axis=0)
+                returns = np.concatenate([white_batch.returns.cpu().numpy(), black_batch.returns.cpu().numpy()], axis=0)
+                old_log_probs = np.concatenate([white_batch.old_log_prob.cpu().numpy(), black_batch.old_log_prob.cpu().numpy()], axis=0)
+                old_values = np.concatenate([white_batch.old_values.cpu().numpy(), black_batch.old_values.cpu().numpy()], axis=0)
+                advantages = np.concatenate([white_batch.advantages.cpu().numpy(), black_batch.advantages.cpu().numpy()], axis=0)
+
+                obs_tensor = torch.FloatTensor(obs).to(self.device)
+                actions_tensor = torch.LongTensor(actions).to(self.device)
+                returns_tensor = torch.FloatTensor(returns).to(self.device)
+                old_log_probs_tensor = torch.FloatTensor(old_log_probs).to(self.device)
+                old_values_tensor = torch.FloatTensor(old_values).to(self.device)
+                advantages_tensor = torch.FloatTensor(advantages).to(self.device)
 
                 _, new_log_probs, entropy = self.policy.evaluate_actions(obs_tensor, actions_tensor)
                 new_values = self.policy.predict_values(obs_tensor)
@@ -305,6 +355,7 @@ class MCTSPPO(PPO):
                 surr1 = ratio * advantages_tensor
                 surr2 = torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * advantages_tensor
                 policy_loss = -torch.min(surr1, surr2).mean()
+
                 value_loss = (new_values - returns_tensor).pow(2).mean()
                 entropy_loss = -entropy.mean()
 
@@ -316,27 +367,25 @@ class MCTSPPO(PPO):
                 self.policy.optimizer.step()
 
                 with torch.no_grad():
-                    kl_sum += (old_log_probs_tensor - new_log_probs).mean().item()
-                    clip_sum += torch.mean((torch.abs(ratio - 1) > 0.2).float()).item()
-                    policy_sum += policy_loss.item()
-                    value_sum += value_loss.item()
-                    entropy_sum += entropy_loss.item()
-                    count += 1
+                    kl_divergence = (old_log_probs_tensor - new_log_probs).mean().item()
+                    kl_divergences.append(kl_divergence)
+                    clip_fraction = torch.mean((torch.abs(ratio - 1) > 0.2).float()).item()
+                    clip_fractions.append(clip_fraction)
+                    explained_var = explained_variance(old_values_tensor.cpu().numpy(), returns_tensor.cpu().numpy())
+                    explained_variances.append(explained_var)
 
-                del obs_tensor, actions_tensor, returns_tensor, old_log_probs_tensor, old_values_tensor, advantages_tensor
+                    policy_losses.append(policy_loss.item())
+                    value_losses.append(value_loss.item())
+                    entropy_losses.append(entropy_loss.item())
 
-        if count > 0:
-            self.logger.record("train/approx_kl", kl_sum / count)
-            self.logger.record("train/clip_fraction", clip_sum / count)
-            self.logger.record("train/policy_gradient_loss", policy_sum / count)
-            self.logger.record("train/value_loss", value_sum / count)
-            self.logger.record("train/entropy_loss", entropy_sum / count)
-            self.logger.record("train/loss", total_loss.item())
-            self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-            self.logger.record("train/explained_variance", explained_variance(
-                torch.cat([self.buffer_white.old_values, self.buffer_black.old_values]).cpu().numpy(),
-                torch.cat([self.buffer_white.returns, self.buffer_black.returns]).cpu().numpy()
-            ))
+        self.logger.record("train/approx_kl", np.mean(kl_divergences))
+        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
+        self.logger.record("train/explained_variance", np.mean(explained_variances))
+        self.logger.record("train/policy_gradient_loss", np.mean(policy_losses))
+        self.logger.record("train/value_loss", np.mean(value_losses))
+        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
+        self.logger.record("train/loss", total_loss.item())
+        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
 
 def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
     policy_kwargs = dict(
