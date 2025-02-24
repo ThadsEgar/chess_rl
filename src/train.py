@@ -86,7 +86,7 @@ def main():
     
     env = SubprocVecEnv(envs)
     env = VecMonitor(env)
-    save_freq = 500_000 // NUM_ENVS
+    save_freq = 10_000_000 // NUM_ENVS
 
     # Create callbacks
     checkpoint_callback = CheckpointCallback(

@@ -401,7 +401,7 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             tensorboard_log=tensorboard_log,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            learning_rate=5e-5,
+            learning_rate=1e-4,
             n_steps=2048,
             batch_size=4096,
             n_epochs=10,
