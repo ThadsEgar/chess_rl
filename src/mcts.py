@@ -6,6 +6,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.utils import explained_variance
 import pyspiel
 
 from custom_gym.chess_gym import ChessEnv, canonical_encode_board
@@ -198,7 +199,6 @@ class MCTSMaskableActorCriticPolicy(ActorCriticPolicy):
 class MCTSPPO(PPO):
     def __init__(self, policy, env, **kwargs):
         super().__init__(policy, env, **kwargs)
-        self.root_players = np.random.randint(0, 2, size=env.num_envs)
         self.buffer_white = RolloutBuffer(
             self.n_steps,
             self.observation_space,
@@ -218,7 +218,7 @@ class MCTSPPO(PPO):
             n_envs=self.n_envs
         )
 
-def collect_rollouts(self, env, callback, n_rollout_steps):
+    def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         n_envs = env.num_envs
         self.buffer_white.reset()
         self.buffer_black.reset()
@@ -261,20 +261,35 @@ def collect_rollouts(self, env, callback, n_rollout_steps):
             if not callback.on_step():
                 return False
 
-            # Separate into White (0) and Black (1) buffers
             for player in [0, 1]:
                 player_indices = np.where(current_players == player)[0]
+                buffer = self.buffer_white if player == 0 else self.buffer_black
+
+                # Pad to n_envs
+                padded_obs = np.zeros_like(self._last_obs)
+                padded_actions = np.zeros((n_envs, 1), dtype=np.int64)
+                padded_rewards = np.zeros(n_envs, dtype=np.float32)
+                padded_episode_starts = np.zeros(n_envs, dtype=bool)
+                padded_values = torch.zeros((n_envs, 1), device=self.device)
+                padded_log_probs = torch.zeros(n_envs, device=self.device)
+
                 if len(player_indices) > 0:
-                    buffer = self.buffer_white if player == 0 else self.buffer_black
-                    buffer.add(
-                        self._last_obs[player_indices],
-                        actions[player_indices].reshape(-1, 1),
-                        rewards[player_indices],
-                        self._last_episode_starts[player_indices],
-                        values[player_indices],
-                        log_probs[player_indices]
-                    )
+                    padded_obs[player_indices] = self._last_obs[player_indices]
+                    padded_actions[player_indices] = actions[player_indices].reshape(-1, 1)
+                    padded_rewards[player_indices] = rewards[player_indices]
+                    padded_episode_starts[player_indices] = self._last_episode_starts[player_indices]
+                    padded_values[player_indices] = values[player_indices]
+                    padded_log_probs[player_indices] = log_probs[player_indices]
                     n_collected[player_indices] += 1
+
+                buffer.add(
+                    padded_obs,
+                    padded_actions,
+                    padded_rewards,
+                    padded_episode_starts,
+                    padded_values,
+                    padded_log_probs
+                )
 
             self.num_timesteps += n_envs
             self._last_obs = np.array(new_obs)
@@ -298,9 +313,79 @@ def collect_rollouts(self, env, callback, n_rollout_steps):
             last_values = self.policy.predict_values(torch.FloatTensor(self._last_obs).to(self.device))
         self.buffer_white.compute_returns_and_advantage(last_values=last_values, dones=dones)
         self.buffer_black.compute_returns_and_advantage(last_values=last_values, dones=dones)
-        
+
         callback.on_rollout_end()
         return True
+
+    def train(self):
+        self.policy.set_training_mode(True)
+        self._n_updates += 1
+
+        batch_size_per_buffer = self.batch_size // 2
+        white_generator = self.buffer_white.get(batch_size_per_buffer)
+        black_generator = self.buffer_black.get(batch_size_per_buffer)
+
+        policy_losses = []
+        value_losses = []
+        entropy_losses = []
+        kl_divergences = []
+        clip_fractions = []
+        explained_variances = []
+
+        for epoch in range(self.n_epochs):
+            for white_batch, black_batch in zip(white_generator, black_generator):
+                obs = np.concatenate([white_batch.observations.cpu().numpy(), black_batch.observations.cpu().numpy()], axis=0)
+                actions = np.concatenate([white_batch.actions.cpu().numpy(), black_batch.actions.cpu().numpy()], axis=0)
+                returns = np.concatenate([white_batch.returns.cpu().numpy(), black_batch.returns.cpu().numpy()], axis=0)
+                old_log_probs = np.concatenate([white_batch.old_log_prob.cpu().numpy(), black_batch.old_log_prob.cpu().numpy()], axis=0)
+                old_values = np.concatenate([white_batch.old_values.cpu().numpy(), black_batch.old_values.cpu().numpy()], axis=0)
+                advantages = np.concatenate([white_batch.advantages.cpu().numpy(), black_batch.advantages.cpu().numpy()], axis=0)
+
+                obs_tensor = torch.FloatTensor(obs).to(self.device)
+                actions_tensor = torch.LongTensor(actions).to(self.device)
+                returns_tensor = torch.FloatTensor(returns).to(self.device)
+                old_log_probs_tensor = torch.FloatTensor(old_log_probs).to(self.device)
+                old_values_tensor = torch.FloatTensor(old_values).to(self.device)
+                advantages_tensor = torch.FloatTensor(advantages).to(self.device)
+
+                _, new_log_probs, entropy = self.policy.evaluate_actions(obs_tensor, actions_tensor)
+                new_values = self.policy.predict_values(obs_tensor)
+
+                ratio = torch.exp(new_log_probs - old_log_probs_tensor)
+                surr1 = ratio * advantages_tensor
+                surr2 = torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * advantages_tensor
+                policy_loss = -torch.min(surr1, surr2).mean()
+
+                value_loss = (new_values - returns_tensor).pow(2).mean()
+                entropy_loss = -entropy.mean()
+
+                total_loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
+
+                self.policy.optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.policy.optimizer.step()
+
+                with torch.no_grad():
+                    kl_divergence = (old_log_probs_tensor - new_log_probs).mean().item()
+                    kl_divergences.append(kl_divergence)
+                    clip_fraction = torch.mean((torch.abs(ratio - 1) > 0.2).float()).item()
+                    clip_fractions.append(clip_fraction)
+                    explained_var = explained_variance(old_values_tensor.cpu().numpy(), returns_tensor.cpu().numpy())
+                    explained_variances.append(explained_var)
+
+                    policy_losses.append(policy_loss.item())
+                    value_losses.append(value_loss.item())
+                    entropy_losses.append(entropy_loss.item())
+
+        self.logger.record("train/approx_kl", np.mean(kl_divergences))
+        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
+        self.logger.record("train/explained_variance", np.mean(explained_variances))
+        self.logger.record("train/policy_gradient_loss", np.mean(policy_losses))
+        self.logger.record("train/value_loss", np.mean(value_losses))
+        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
+        self.logger.record("train/loss", total_loss.item())
+        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
 
 def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
     policy_kwargs = dict(
@@ -317,9 +402,9 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=5e-5,
-            n_steps=2048,
-            batch_size=4096,
-            n_epochs=10,
+            n_steps=32,
+            batch_size=2048,
+            n_epochs=4096,
             gamma=0.99,
             device=device,
             clip_range=0.2,
