@@ -183,7 +183,7 @@ class MCTSMaskableActorCriticPolicy(ActorCriticPolicy):
 
     def predict(self, observation, state=None, episode_start=None, deterministic=False):
         if self.mcts is None:
-            self.mcts = MCTS(self, num_simulations=400, c_puct=1.5)
+            self.mcts = MCTS(self, num_simulations=400, c_puct=2)
         if deterministic:  # Always use MCTS for deterministic in testing
             self.training = False  # Force testing mode
             action = self.mcts.search(state)
@@ -312,43 +312,6 @@ class MCTSPPO(PPO):
         
         callback.on_rollout_end()
         return True
-
-    def train(self):
-        self.policy.train()
-        clip_range = self.clip_range
-        
-        for epoch in range(self.n_epochs):
-            for batch_idx, rollout_data in enumerate(self.rollout_buffer.get(self.batch_size)):
-                                
-                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, rollout_data.actions)
-                values = values.flatten()
-                
-                log_prob_diff = torch.clamp(log_prob - rollout_data.old_log_prob, min=-10.0, max=10.0)
-                advantages = rollout_data.returns - values
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-                
-                ratio = torch.exp(log_prob_diff)
-                
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * torch.clamp(ratio, 1 - 0.1, 1 + 0.1)
-                policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
-                
-                value_loss = ((values - rollout_data.returns) ** 2).mean()
-                entropy_loss = -self.ent_coef * entropy.mean()
-                loss = policy_loss + self.vf_coef * value_loss + entropy_loss
-                
-                self.policy.optimizer.zero_grad()
-                loss.backward()
-                
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                for name, param in self.policy.named_parameters():
-                    if param.grad is not None:
-                        grad_norm = param.grad.norm().item()
-                        # print(f"Gradient norm of {name}: {grad_norm:.4f}", flush=True)
-                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                            print(f"NaN or Inf in gradients of {name}:", param.grad[torch.isnan(param.grad) | torch.isinf(param.grad)], flush=True)
-                
-                self.policy.optimizer.step()
         
 def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
     policy_kwargs = dict(

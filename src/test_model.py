@@ -77,7 +77,7 @@ def main():
             print("Invalid choice, defaulting to white.")
             human_color = 'w'
     
-    model = PPO.load("data/models/chess_model_complete")
+    model = PPO.load("data/models/chess_model_54999120_steps")
     model.policy.set_training_mode(False)  # Ensure testing mode
     
     done = False
