@@ -197,16 +197,32 @@ class MCTSMaskableActorCriticPolicy(ActorCriticPolicy):
 
 class MCTSPPO(PPO):
     def __init__(self, policy, env, **kwargs):
-        self.raw_clip_range = kwargs.pop('clip_range', 0.2)
         super().__init__(policy, env, **kwargs)
-        self.clip_range = self.raw_clip_range
         self.root_players = np.random.randint(0, 2, size=env.num_envs)
+        self.buffer_white = RolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs
+        )
+        self.buffer_black = RolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs
+        )
 
-    def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
+def collect_rollouts(self, env, callback, n_rollout_steps):
         n_envs = env.num_envs
-        rollout_buffer.reset()
+        self.buffer_white.reset()
+        self.buffer_black.reset()
         n_collected = np.zeros(n_envs, dtype=int)
-        buffer_additions = 0
 
         reset_output = env.reset()
         if isinstance(reset_output, tuple):
@@ -219,25 +235,13 @@ class MCTSPPO(PPO):
             self._last_obs = np.expand_dims(self._last_obs, axis=0)
         self._last_episode_starts = np.ones(n_envs, dtype=bool)
 
-        for e in range(n_envs):
-            self.root_players[e] = np.random.randint(0, 2)
-
-        max_buffer_steps = n_rollout_steps
-        while buffer_additions < max_buffer_steps and np.sum(n_collected) < n_rollout_steps * n_envs:
+        while np.sum(n_collected) < n_rollout_steps * n_envs:
             current_players = np.array([info.get("current_player", 0) for info in infos])
-            is_root_player = (current_players == self.root_players)
 
             with torch.no_grad():
                 obs_tensor = torch.FloatTensor(self._last_obs).to(self.device)
-                if torch.isnan(obs_tensor).any():
-                    print("NaN in obs_tensor (policy):", obs_tensor[torch.isnan(obs_tensor)], flush=True)
                 actions, _, _ = self.policy(obs_tensor)
                 actions = actions.cpu().numpy()
-
-            with torch.no_grad():
-                obs_tensor = torch.FloatTensor(self._last_obs).to(self.device)
-                if torch.isnan(obs_tensor).any():
-                    print("NaN in obs_tensor (values):", obs_tensor[torch.isnan(obs_tensor)], flush=True)
                 _, values, log_probs_full = self.policy(obs_tensor, return_logits=True)
                 actions_tensor = torch.LongTensor(actions).to(self.device).unsqueeze(1)
                 log_probs = torch.gather(
@@ -253,39 +257,24 @@ class MCTSPPO(PPO):
             else:
                 new_obs, rewards, dones, truncated, infos = step_result
 
-            # Call callback.on_step() without messing with self.locals
             callback.update_locals(locals())
             if not callback.on_step():
                 return False
 
-            root_indices = np.where(is_root_player)[0]
-            if len(root_indices) > 0:
-                padded_obs = np.zeros_like(self._last_obs)
-                padded_actions = np.zeros((n_envs, 1), dtype=np.int64)
-                padded_rewards = np.zeros(n_envs, dtype=np.float32)
-                padded_episode_starts = np.zeros(n_envs, dtype=bool)
-                padded_values = torch.zeros((n_envs, 1), device=self.device)
-                padded_log_probs = torch.full((n_envs,), -10.0, device=self.device)
-
-                padded_obs[root_indices] = self._last_obs[root_indices]
-                padded_actions[root_indices] = actions[root_indices].reshape(-1, 1)
-                padded_rewards[root_indices] = rewards[root_indices]
-                padded_episode_starts[root_indices] = self._last_episode_starts[root_indices]
-                padded_values[root_indices] = values[root_indices]
-                padded_log_probs[root_indices] = log_probs[root_indices]
-                
-                if np.isnan(padded_obs).any():
-                    print("NaN in padded_obs stored to buffer:", padded_obs[np.isnan(padded_obs)], flush=True)
-                rollout_buffer.add(
-                    padded_obs,
-                    padded_actions,
-                    padded_rewards,
-                    padded_episode_starts,
-                    padded_values,
-                    padded_log_probs
-                )
-                buffer_additions += 1
-                n_collected[root_indices] += 1
+            # Separate into White (0) and Black (1) buffers
+            for player in [0, 1]:
+                player_indices = np.where(current_players == player)[0]
+                if len(player_indices) > 0:
+                    buffer = self.buffer_white if player == 0 else self.buffer_black
+                    buffer.add(
+                        self._last_obs[player_indices],
+                        actions[player_indices].reshape(-1, 1),
+                        rewards[player_indices],
+                        self._last_episode_starts[player_indices],
+                        values[player_indices],
+                        log_probs[player_indices]
+                    )
+                    n_collected[player_indices] += 1
 
             self.num_timesteps += n_envs
             self._last_obs = np.array(new_obs)
@@ -304,15 +293,15 @@ class MCTSPPO(PPO):
                     if obs_e.ndim == 1:
                         obs_e = np.expand_dims(obs_e, axis=0)[0]
                     self._last_obs[e, :] = obs_e
-                    self.root_players[e] = np.random.randint(0, 2)
 
         with torch.no_grad():
             last_values = self.policy.predict_values(torch.FloatTensor(self._last_obs).to(self.device))
-        rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
+        self.buffer_white.compute_returns_and_advantage(last_values=last_values, dones=dones)
+        self.buffer_black.compute_returns_and_advantage(last_values=last_values, dones=dones)
         
         callback.on_rollout_end()
         return True
-        
+
 def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
     policy_kwargs = dict(
         net_arch=dict(pi=[512, 512, 256, 256, 128], vf=[512, 512, 256, 256, 128])
@@ -327,12 +316,13 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             tensorboard_log=tensorboard_log,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            learning_rate=3e-5,
+            learning_rate=5e-5,
             n_steps=2048,
             batch_size=4096,
             n_epochs=10,
             gamma=0.99,
             device=device,
-            clip_range=0.2
+            clip_range=0.2,
+            ent_coef=0.01
         )
     return model
