@@ -20,7 +20,7 @@ def make_env(rank, seed=0):
     return _init
 
 class ChessMetricsCallback(BaseCallback):
-    def __init__(self, verbose=0, log_freq=1_000):
+    def __init__(self, verbose=0, log_freq=1):
         super().__init__(verbose)
         self.log_freq = log_freq
         self.game_outcomes = defaultdict(int)
