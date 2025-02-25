@@ -199,201 +199,117 @@ class MCTSMaskableActorCriticPolicy(ActorCriticPolicy):
 class MCTSPPO(PPO):
     def __init__(self, policy, env, **kwargs):
         super().__init__(policy, env, **kwargs)
-        self.buffer_white = RolloutBuffer(
-            self.n_steps,
-            self.observation_space,
-            self.action_space,
-            self.device,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            n_envs=self.n_envs
-        )
-        self.buffer_black = RolloutBuffer(
-            self.n_steps,
-            self.observation_space,
-            self.action_space,
-            self.device,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            n_envs=self.n_envs
-        )
-
-    def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
-        n_envs = env.num_envs
-        self.buffer_white.reset()
-        self.buffer_black.reset()
-        n_collected = np.zeros(n_envs, dtype=int)
-
-        reset_output = env.reset()
-        if isinstance(reset_output, tuple):
-            initial_obs, infos = reset_output
+        self.last_agent_step = [None] * self.n_envs
+        if self.n_envs % 2 == 0:
+            half = self.n_envs // 2
+            self.agent_record_player = np.array([0] * half + [1] * half)
         else:
-            initial_obs = reset_output
-            infos = [{}] * n_envs
-        self._last_obs = np.array(initial_obs)
-        if self._last_obs.ndim == 1:
-            self._last_obs = np.expand_dims(self._last_obs, axis=0)
-        self._last_episode_starts = np.ones(n_envs, dtype=bool)
+            half = self.n_envs // 2
+            extra = np.random.choice([0, 1])
+            self.agent_record_player = np.array([0] * half + [1] * half + [extra])
 
-        while np.sum(n_collected) < n_rollout_steps * n_envs:
-            current_players = np.array([info.get("current_player", 0) for info in infos])
+def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
+    assert self._last_obs is not None, "No previous observation"
+    n_steps = 0
+    rollout_buffer.reset()
 
-            with torch.no_grad():
-                obs_tensor = torch.FloatTensor(self._last_obs).to(self.device)
-                actions, _, _ = self.policy(obs_tensor)
-                actions = actions.cpu().numpy()
-                _, values, log_probs_full = self.policy(obs_tensor, return_logits=True)
-                actions_tensor = torch.LongTensor(actions).to(self.device).unsqueeze(1)
-                log_probs = torch.gather(
-                    torch.log_softmax(log_probs_full, dim=-1),
-                    1, actions_tensor
-                ).flatten()
-                log_probs = torch.clamp(log_probs, min=-10.0, max=0.0)
-
-            step_result = env.step(actions)
-            if len(step_result) == 4:
-                new_obs, rewards, dones, infos = step_result
-                truncated = np.zeros_like(dones, dtype=bool)
-            else:
-                new_obs, rewards, dones, truncated, infos = step_result
-
-            callback.update_locals(locals())
-            if not callback.on_step():
-                return False
-
-            for player in [0, 1]:
-                player_indices = np.where(current_players == player)[0]
-                buffer = self.buffer_white if player == 0 else self.buffer_black
-
-                # Pad to n_envs
-                padded_obs = np.zeros_like(self._last_obs)
-                padded_actions = np.zeros((n_envs, 1), dtype=np.int64)
-                padded_rewards = np.zeros(n_envs, dtype=np.float32)
-                padded_episode_starts = np.zeros(n_envs, dtype=bool)
-                padded_values = torch.zeros((n_envs, 1), device=self.device)
-                padded_log_probs = torch.zeros(n_envs, device=self.device)
-
-                if len(player_indices) > 0:
-                    padded_obs[player_indices] = self._last_obs[player_indices]
-                    padded_actions[player_indices] = actions[player_indices].reshape(-1, 1)
-                    padded_rewards[player_indices] = rewards[player_indices]
-                    padded_episode_starts[player_indices] = self._last_episode_starts[player_indices]
-                    padded_values[player_indices] = values[player_indices]
-                    padded_log_probs[player_indices] = log_probs[player_indices]
-                    n_collected[player_indices] += 1
-
-                buffer.add(
-                    padded_obs,
-                    padded_actions,
-                    padded_rewards,
-                    padded_episode_starts,
-                    padded_values,
-                    padded_log_probs
-                )
-
-            self.num_timesteps += n_envs
-            self._last_obs = np.array(new_obs)
-            if self._last_obs.ndim == 1:
-                self._last_obs = np.expand_dims(self._last_obs, axis=0)
-            self._last_episode_starts = dones
-
-            for e in range(n_envs):
-                if dones[e] or truncated[e]:
-                    reset_individual = env.env_method("reset", indices=[e])[0]
-                    if isinstance(reset_individual, tuple):
-                        obs_e = reset_individual[0]
-                    else:
-                        obs_e = reset_individual
-                    obs_e = np.array(obs_e)
-                    if obs_e.ndim == 1:
-                        obs_e = np.expand_dims(obs_e, axis=0)[0]
-                    self._last_obs[e, :] = obs_e
-
+    while n_steps < n_rollout_steps:
         with torch.no_grad():
-            last_values = self.policy.predict_values(torch.FloatTensor(self._last_obs).to(self.device))
-        self.buffer_white.compute_returns_and_advantage(last_values=last_values, dones=dones)
-        self.buffer_black.compute_returns_and_advantage(last_values=last_values, dones=dones)
+            obs_tensor = torch.as_tensor(self._last_obs).to(self.device)
+            actions, values, log_probs = self.policy.forward(obs_tensor)
+        actions = actions.cpu().numpy()
 
-        callback.on_rollout_end()
-        return True
+        # Step the environment
+        new_obs, rewards, dones, infos = env.step(actions)
+        if not isinstance(infos, list):
+            infos = [infos]
+        current_players = [info.get("current_player", 0) for info in infos]
 
-    def train(self):
-        self.policy.set_training_mode(True)
-        self._n_updates += 1
+        # Update callback
+        callback.update_locals(locals())
+        if not callback.on_step():
+            return False
 
-        batch_size_per_buffer = self.batch_size // 2
-        white_generator = self.buffer_white.get(batch_size_per_buffer)
-        black_generator = self.buffer_black.get(batch_size_per_buffer)
+        # Prepare full batch data for all environments
+        batch_obs = np.zeros_like(self._last_obs)  # Shape: (n_envs, obs_dim)
+        batch_actions = np.zeros(self.n_envs, dtype=int)  # Assuming discrete actions
+        batch_rewards = np.zeros(self.n_envs, dtype=float)
+        batch_episode_starts = np.zeros(self.n_envs, dtype=bool)
+        batch_values = torch.zeros_like(values)
+        batch_log_probs = torch.zeros_like(log_probs)
 
-        policy_losses = []
-        value_losses = []
-        entropy_losses = []
-        kl_divergences = []
-        clip_fractions = []
-        explained_variances = []
+        # Fill in data where the agent is acting
+        for e in range(self.n_envs):
+            if current_players[e] == self.agent_record_player[e]:
+                batch_obs[e] = self._last_obs[e]
+                batch_actions[e] = actions[e]
+                batch_rewards[e] = rewards[e]
+                batch_episode_starts[e] = self._last_episode_starts[e]
+                batch_values[e] = values[e]
+                batch_log_probs[e] = log_probs[e]
+                # Track the current buffer position for the agent’s action
+                self.last_agent_step[e] = rollout_buffer.pos
 
-        for epoch in range(self.n_epochs):
-            for white_batch, black_batch in zip(white_generator, black_generator):
-                obs = np.concatenate([white_batch.observations.cpu().numpy(), black_batch.observations.cpu().numpy()], axis=0)
-                actions = np.concatenate([white_batch.actions.cpu().numpy(), black_batch.actions.cpu().numpy()], axis=0)
-                returns = np.concatenate([white_batch.returns.cpu().numpy(), black_batch.returns.cpu().numpy()], axis=0)
-                old_log_probs = np.concatenate([white_batch.old_log_prob.cpu().numpy(), black_batch.old_log_prob.cpu().numpy()], axis=0)
-                old_values = np.concatenate([white_batch.old_values.cpu().numpy(), black_batch.old_values.cpu().numpy()], axis=0)
-                advantages = np.concatenate([white_batch.advantages.cpu().numpy(), black_batch.advantages.cpu().numpy()], axis=0)
+        # Add full batch to rollout buffer
+        rollout_buffer.add(
+            batch_obs,
+            batch_actions.reshape(self.n_envs, 1),  # Shape: (n_envs, 1)
+            batch_rewards,
+            batch_episode_starts,
+            batch_values,
+            batch_log_probs
+        )
 
-                obs_tensor = torch.FloatTensor(obs).to(self.device)
-                actions_tensor = torch.LongTensor(actions).to(self.device)
-                returns_tensor = torch.FloatTensor(returns).to(self.device)
-                old_log_probs_tensor = torch.FloatTensor(old_log_probs).to(self.device)
-                old_values_tensor = torch.FloatTensor(old_values).to(self.device)
-                advantages_tensor = torch.FloatTensor(advantages).to(self.device)
+        # Adjust reward if opponent ends the game
+        for e in range(self.n_envs):
+            if dones[e] and current_players[e] != self.agent_record_player[e]:
+                if self.last_agent_step[e] is not None:
+                    last_pos = self.last_agent_step[e]
+                    # Set the agent’s last reward to -1 (assuming loss)
+                    rollout_buffer.rewards[last_pos, e] = -1
 
-                _, new_log_probs, entropy = self.policy.evaluate_actions(obs_tensor, actions_tensor)
-                new_values = self.policy.predict_values(obs_tensor)
+        # Update state
+        self._last_obs = new_obs
+        self._last_episode_starts = dones
+        for e in range(self.n_envs):
+            if dones[e]:
+                self._last_obs[e], _ = env.reset([e])  # Reset individual env (adjust if needed)
+                self.last_agent_step[e] = None
 
-                ratio = torch.exp(new_log_probs - old_log_probs_tensor)
-                surr1 = ratio * advantages_tensor
-                surr2 = torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * advantages_tensor
-                policy_loss = -torch.min(surr1, surr2).mean()
+        self.num_timesteps += self.n_envs
+        n_steps += 1
 
-                value_loss = (new_values - returns_tensor).pow(2).mean()
-                entropy_loss = -entropy.mean()
+        # Prevent buffer overflow
+        if rollout_buffer.pos >= n_rollout_steps:
+            break
 
-                total_loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
+    # Compute returns and advantages
+    with torch.no_grad():
+        last_values = self.policy.predict_values(torch.as_tensor(self._last_obs).to(self.device))
+    rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
-                self.policy.optimizer.zero_grad()
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
-
-                with torch.no_grad():
-                    kl_divergence = (old_log_probs_tensor - new_log_probs).mean().item()
-                    kl_divergences.append(kl_divergence)
-                    clip_fraction = torch.mean((torch.abs(ratio - 1) > 0.2).float()).item()
-                    clip_fractions.append(clip_fraction)
-                    explained_var = explained_variance(old_values_tensor.cpu().numpy(), returns_tensor.cpu().numpy())
-                    explained_variances.append(explained_var)
-
-                    policy_losses.append(policy_loss.item())
-                    value_losses.append(value_loss.item())
-                    entropy_losses.append(entropy_loss.item())
-
-        self.logger.record("train/approx_kl", np.mean(kl_divergences))
-        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
-        self.logger.record("train/explained_variance", np.mean(explained_variances))
-        self.logger.record("train/policy_gradient_loss", np.mean(policy_losses))
-        self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
-        self.logger.record("train/loss", total_loss.item())
-        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+    return True
 
 def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
     policy_kwargs = dict(
         net_arch=dict(pi=[512, 512, 256, 256, 128], vf=[512, 512, 256, 256, 128])
     )
     
-    if checkpoint and os.path.exists(checkpoint):
-        model = MCTSPPO.load(checkpoint, env=env, tensorboard_log=tensorboard_log, device=device)
+    if checkpoint:
+        print(f'checkpoint: {checkpoint} loaded')
+        model = MCTSPPO.load(checkpoint, 
+                            env=env, 
+                            tensorboard_log=tensorboard_log, 
+                            verbose=1,
+                            learning_rate=5e-5,
+                            n_steps=16384,
+                            batch_size=16384,
+                            n_epochs=10,
+                            gamma=0.99,
+                            device=device,
+                            clip_range=0.2,
+                            ent_coef=0.05,
+                            vf_coef=1.0)
     else:
         model = MCTSPPO(
             MCTSMaskableActorCriticPolicy,
@@ -401,13 +317,14 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             tensorboard_log=tensorboard_log,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            learning_rate=1e-4,
-            n_steps=2048,
-            batch_size=4096,
+            learning_rate=5e-5,
+            n_steps=16384,
+            batch_size=16384,
             n_epochs=10,
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.01
+            ent_coef=0.05,
+            vf_coef=1.0
         )
     return model

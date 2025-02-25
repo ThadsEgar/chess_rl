@@ -43,13 +43,8 @@ class ChessMetricsCallback(BaseCallback):
                     self.game_outcomes['draws'] += 1
                 self.move_counts.append(info.get('move_count', 0))
 
-        # Log only every log_freq steps
         if self.step_count % self.log_freq != 0:
             return True
-        
-        #print(f"Step {self.step_count}", flush=True)
-        #for info in self.locals['infos']:
-            #print(f"Info: {info}", flush=True)
         
         if self.games_played > 0:
             white_win_rate = self.game_outcomes['white_wins'] / self.games_played
@@ -75,13 +70,10 @@ def main():
     os.makedirs(TENSORBOARD_LOG, exist_ok=True)
     os.makedirs("data/models", exist_ok=True)
 
-    # Number of parallel environments
-    NUM_ENVS = 2  # Match to your number of CPU cores
+    NUM_ENVS = 48  # Match to your number of CPU cores
     
-    # Create environments with proper multiprocessing start method
     envs = [make_env(i) for i in range(NUM_ENVS)]
     
-    # Set the start method to 'spawn' (more stable than 'fork' for PyTorch)
     multiprocessing.set_start_method('spawn', force=True)
     
     env = SubprocVecEnv(envs)
@@ -102,7 +94,7 @@ def main():
         env=env,
         tensorboard_log=TENSORBOARD_LOG,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint='data/models/chess_model_checkpoint1'
+        checkpoint='data/models/chess_model_checkpoint_4,6MG'
     )
 
     # Train the model with both callbacks

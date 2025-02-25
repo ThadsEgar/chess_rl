@@ -208,94 +208,108 @@ class MCTSPPO(PPO):
             extra = np.random.choice([0, 1])
             self.agent_record_player = np.array([0] * half + [1] * half + [extra])
 
-    def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
-        assert self._last_obs is not None, "No previous observation"
-        n_steps = 0
-        rollout_buffer.reset()
+def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
+    assert self._last_obs is not None, "No previous observation"
+    n_steps = 0
+    rollout_buffer.reset()
 
-        while n_steps < n_rollout_steps:
-            with torch.no_grad():
-                obs_tensor = torch.as_tensor(self._last_obs).to(self.device)
-                actions, values, log_probs = self.policy.forward(obs_tensor)
-            actions = actions.cpu().numpy()
-
-            # Step the environment
-            new_obs, rewards, dones, infos = env.step(actions)
-            if not isinstance(infos, list):
-                infos = [infos]
-            current_players = [info.get("current_player", 0) for info in infos]
-
-            # Prepare data for all environments
-            batch_obs = []
-            batch_actions = []
-            batch_rewards = []
-            batch_episode_starts = []
-            batch_values = []
-            batch_log_probs = []
-
-            for e in range(self.n_envs):
-                if current_players[e] == self.agent_record_player[e]:
-                    batch_obs.append(self._last_obs[e])
-                    batch_actions.append(actions[e])
-                    batch_rewards.append(rewards[e])
-                    batch_episode_starts.append(self._last_episode_starts[e])
-                    batch_values.append(values[e])
-                    batch_log_probs.append(log_probs[e])
-                    self.last_agent_step[e] = rollout_buffer.pos + len(batch_rewards) - 1
-                else:
-                    batch_obs.append(np.zeros_like(self._last_obs[e]))
-                    batch_actions.append(0)
-                    batch_rewards.append(0.0)
-                    batch_episode_starts.append(False)
-                    batch_values.append(torch.zeros_like(values[e]))
-                    batch_log_probs.append(torch.zeros_like(log_probs[e]))
-
-                # Adjust reward if opponent ends the game
-                if dones[e] and current_players[e] != self.agent_record_player[e]:
-                    if self.last_agent_step[e] is not None:
-                        last_pos = self.last_agent_step[e]
-                        rollout_buffer.rewards[last_pos, e] = -rewards[e]
-
-            # Add batched data
-            rollout_buffer.add(
-                np.array(batch_obs),
-                np.array(batch_actions).reshape(self.n_envs, 1),
-                np.array(batch_rewards),
-                np.array(batch_episode_starts),
-                torch.stack(batch_values),
-                torch.stack(batch_log_probs)
-            )
-
-            # Update observation and timestep tracking
-            self._last_obs = new_obs
-            self._last_episode_starts = dones
-            for e in range(self.n_envs):
-                if dones[e]:
-                    self._last_obs[e] = new_obs[e]  # Use step’s new observation
-                    self.last_agent_step[e] = None
-
-            # Increment timesteps for all environments
-            self.num_timesteps += self.n_envs
-            n_steps += 1
-        
-            callback.update_locals(locals())
-            if not callback.on_step():
-                    return False
-
-        # Compute returns and advantages
+    while n_steps < n_rollout_steps:
         with torch.no_grad():
-            last_values = self.policy.predict_values(torch.as_tensor(self._last_obs).to(self.device))
-        rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
-        callback.on_rollout_end()
-        return True
+            obs_tensor = torch.as_tensor(self._last_obs).to(self.device)
+            actions, values, log_probs = self.policy.forward(obs_tensor)
+        actions = actions.cpu().numpy()
+
+        # Step the environment
+        new_obs, rewards, dones, infos = env.step(actions)
+        if not isinstance(infos, list):
+            infos = [infos]
+        current_players = [info.get("current_player", 0) for info in infos]
+
+        # Update callback
+        callback.update_locals(locals())
+        if not callback.on_step():
+            return False
+
+        # Prepare full batch data for all environments
+        batch_obs = np.zeros_like(self._last_obs)  # Shape: (n_envs, obs_dim)
+        batch_actions = np.zeros(self.n_envs, dtype=int)  # Assuming discrete actions
+        batch_rewards = np.zeros(self.n_envs, dtype=float)
+        batch_episode_starts = np.zeros(self.n_envs, dtype=bool)
+        batch_values = torch.zeros_like(values)
+        batch_log_probs = torch.zeros_like(log_probs)
+
+        # Fill in data where the agent is acting
+        for e in range(self.n_envs):
+            if current_players[e] == self.agent_record_player[e]:
+                batch_obs[e] = self._last_obs[e]
+                batch_actions[e] = actions[e]
+                batch_rewards[e] = rewards[e]
+                batch_episode_starts[e] = self._last_episode_starts[e]
+                batch_values[e] = values[e]
+                batch_log_probs[e] = log_probs[e]
+                # Track the current buffer position for the agent’s action
+                self.last_agent_step[e] = rollout_buffer.pos
+
+        # Add full batch to rollout buffer
+        rollout_buffer.add(
+            batch_obs,
+            batch_actions.reshape(self.n_envs, 1),  # Shape: (n_envs, 1)
+            batch_rewards,
+            batch_episode_starts,
+            batch_values,
+            batch_log_probs
+        )
+
+        # Adjust reward if opponent ends the game
+        for e in range(self.n_envs):
+            if dones[e] and current_players[e] != self.agent_record_player[e]:
+                if self.last_agent_step[e] is not None:
+                    last_pos = self.last_agent_step[e]
+                    # Set the agent’s last reward to -1 (assuming loss)
+                    rollout_buffer.rewards[last_pos, e] = -1
+
+        # Update state
+        self._last_obs = new_obs
+        self._last_episode_starts = dones
+        for e in range(self.n_envs):
+            if dones[e]:
+                self._last_obs[e], _ = env.reset([e])  # Reset individual env (adjust if needed)
+                self.last_agent_step[e] = None
+
+        self.num_timesteps += self.n_envs
+        n_steps += 1
+
+        # Prevent buffer overflow
+        if rollout_buffer.pos >= n_rollout_steps:
+            break
+
+    # Compute returns and advantages
+    with torch.no_grad():
+        last_values = self.policy.predict_values(torch.as_tensor(self._last_obs).to(self.device))
+    rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
+
+    return True
 
 def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
     policy_kwargs = dict(
         net_arch=dict(pi=[512, 512, 256, 256, 128], vf=[512, 512, 256, 256, 128])
     )
     
-    if checkpoint and os.path.exists(checkpoint):
-        model = MCTSPPO.load(checkpoint, env=env, tensorboard_log=tensorboard_log, device=device)
+    if checkpoint:
+        print(f'checkpoint: {checkpoint} loaded')
+        model = MCTSPPO.load(checkpoint, 
+                            env=env, 
+                            tensorboard_log=tensorboard_log, 
+                            verbose=1,
+                            learning_rate=5e-5,
+                            n_steps=16384,
+                            batch_size=16384,
+                            n_epochs=10,
+                            gamma=0.99,
+                            device=device,
+                            clip_range=0.2,
+                            ent_coef=0.05,
+                            vf_coef=1.0)
     else:
         model = MCTSPPO(
             MCTSMaskableActorCriticPolicy,
@@ -303,13 +317,14 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             tensorboard_log=tensorboard_log,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            learning_rate=1e-4,
-            n_steps=2048,
-            batch_size=4096,
-            n_epochs=1,
+            learning_rate=5e-5,
+            n_steps=16384,
+            batch_size=16384,
+            n_epochs=10,
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.01
+            ent_coef=0.05,
+            vf_coef=1.0
         )
     return model
