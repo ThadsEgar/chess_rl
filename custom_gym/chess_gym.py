@@ -175,6 +175,14 @@ class ChessEnv(gym.Env):
             'starting_player': self.starting_player
         }
         
+            # Add 'outcome' based on game result
+        if result['white_won']:
+            info['outcome'] = 1  # White wins
+        elif result['black_won']:
+            info['outcome'] = -1  # Black wins
+        else:  # draw
+            info['outcome'] = 0
+            
         if done:
             opponent = 1 - current_player
             info['opponent_reward'] = float(self.state.rewards()[opponent])

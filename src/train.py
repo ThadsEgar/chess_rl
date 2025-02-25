@@ -76,7 +76,7 @@ def main():
     os.makedirs("data/models", exist_ok=True)
 
     # Number of parallel environments
-    NUM_ENVS = 48  # Match to your number of CPU cores
+    NUM_ENVS = 2  # Match to your number of CPU cores
     
     # Create environments with proper multiprocessing start method
     envs = [make_env(i) for i in range(NUM_ENVS)]
