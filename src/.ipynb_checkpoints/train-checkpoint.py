@@ -94,7 +94,7 @@ def main():
         env=env,
         tensorboard_log=TENSORBOARD_LOG,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint='data/models/chess_model_checkpoint_4,6MG'
+        checkpoint='data/models/chess_model_59999904_steps'
     )
 
     # Train the model with both callbacks

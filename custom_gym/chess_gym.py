@@ -8,7 +8,6 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
-
 piece_mapping = {
     'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
     'p': -1, 'n': -2, 'b': -3, 'r': -4, 'q': -5, 'k': -6
@@ -49,6 +48,7 @@ def render_board(state):
         output += f"{row_num}  " + "  ".join(row) + "\n"
     output += "   " + "  ".join(list("abcdefgh")) + "\n"
     return output
+
 def encode_board(state):
     fen = str(state)
     board_fen = fen.split()[0]
@@ -66,7 +66,10 @@ def encode_board(state):
 
 def canonical_encode_board(state):
     board = encode_board(state)
-    if state.current_player() == 1:
+    # In our environment white is represented as player 1.
+    # We want the board always to be rendered with white at the bottom.
+    # Thus, if it's black's turn (current_player() returns 0), flip the board.
+    if state.current_player() == 0:
         board = np.rot90(board, 2)
         board = -board
     return board
@@ -83,10 +86,11 @@ def get_game_result(state):
     }
     
     rewards = state.rewards()
-    if rewards[0] > 0:
+    # Since white is player 1 and black is player 0, swap the indices:
+    if rewards[1] > 0:
         result['white_won'] = True
         result['checkmate'] = True
-    elif rewards[1] > 0:
+    elif rewards[0] > 0:
         result['black_won'] = True
         result['checkmate'] = True
     else:
@@ -114,8 +118,7 @@ class ChessEnv(gym.Env):
         board_size = 64
         num_actions = 4672
         obs_size = board_size + num_actions
-        self.starting_player = 0  # Randomized in reset
-
+        
         self.observation_space = spaces.Box(
             low=-6,
             high=6,
@@ -133,8 +136,7 @@ class ChessEnv(gym.Env):
         self.state = self.game.new_initial_state()
         self.last_move = None
         self.position_history = [str(self.state)]
-        self.starting_player = np.random.choice([0, 1])
-        return self._get_obs(), {'starting_player': self.starting_player}
+        return self._get_obs(), {'starting_player': self.state.current_player()}
 
     def step(self, action):
         current_player = self.state.current_player()
@@ -172,15 +174,14 @@ class ChessEnv(gym.Env):
             'is_checkmate': result['checkmate'],
             'is_stalemate': result['stalemate'],
             'position_repetition_count': self.position_history.count(str(self.state)),
-            'starting_player': self.starting_player
         }
         
-            # Add 'outcome' based on game result
+        # Set outcome based on game result: white win -> outcome=1, black win -> outcome=-1, draw -> outcome=0.
         if result['white_won']:
-            info['outcome'] = 1  # White wins
+            info['outcome'] = 1  
         elif result['black_won']:
-            info['outcome'] = -1  # Black wins
-        else:  # draw
+            info['outcome'] = -1  
+        else:
             info['outcome'] = 0
             
         if done:

@@ -224,7 +224,7 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
         if not isinstance(infos, list):
             infos = [infos]
         current_players = [info.get("current_player", 0) for info in infos]
-
+        print('help')
         # Update callback
         callback.update_locals(locals())
         if not callback.on_step():
@@ -247,7 +247,6 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
                 batch_episode_starts[e] = self._last_episode_starts[e]
                 batch_values[e] = values[e]
                 batch_log_probs[e] = log_probs[e]
-                # Track the current buffer position for the agent’s action
                 self.last_agent_step[e] = rollout_buffer.pos
 
         # Add full batch to rollout buffer
@@ -259,14 +258,14 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
             batch_values,
             batch_log_probs
         )
-
-        # Adjust reward if opponent ends the game
+        print(self.agent_record_player, flush=True)
         for e in range(self.n_envs):
             if dones[e] and current_players[e] != self.agent_record_player[e]:
                 if self.last_agent_step[e] is not None:
                     last_pos = self.last_agent_step[e]
-                    # Set the agent’s last reward to -1 (assuming loss)
                     rollout_buffer.rewards[last_pos, e] = -1
+                    print(self.agent_record_player[e], f'last pos {last_pos}', flush=True)
+                    print(rollout_buffer)
 
         # Update state
         self._last_obs = new_obs
@@ -302,8 +301,8 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
                             tensorboard_log=tensorboard_log, 
                             verbose=1,
                             learning_rate=5e-5,
-                            n_steps=16384,
-                            batch_size=16384,
+                            n_steps=32,
+                            batch_size=32,
                             n_epochs=10,
                             gamma=0.99,
                             device=device,
@@ -318,8 +317,8 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=5e-5,
-            n_steps=16384,
-            batch_size=16384,
+            n_steps=32,
+            batch_size=32,
             n_epochs=10,
             gamma=0.99,
             device=device,

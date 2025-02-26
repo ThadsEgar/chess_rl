@@ -70,7 +70,7 @@ def main():
     os.makedirs(TENSORBOARD_LOG, exist_ok=True)
     os.makedirs("data/models", exist_ok=True)
 
-    NUM_ENVS = 48  # Match to your number of CPU cores
+    NUM_ENVS = 2  # Match to your number of CPU cores
     
     envs = [make_env(i) for i in range(NUM_ENVS)]
     
@@ -94,7 +94,7 @@ def main():
         env=env,
         tensorboard_log=TENSORBOARD_LOG,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint='data/models/chess_model_checkpoint_4,6MG'
+        checkpoint='data/models/chess_model_59999904_steps'
     )
 
     # Train the model with both callbacks

@@ -1,7 +1,6 @@
 from time import sleep
 import os
 import sys
-import chess
 import numpy as np
 from stable_baselines3 import PPO
 from custom_gym.chess_gym import ChessEnv
@@ -31,8 +30,8 @@ def human_move(env):
 
 def print_board_and_info(env, reward, info, player_mode, human_color=None, white_action=None, black_action=None):
     """Print the board and info in place using ANSI codes."""
-    sys.stdout.write('\033[H')
-    sys.stdout.flush()
+    #sys.stdout.write('\033[H')
+    #sys.stdout.flush()
     
     env.render()
     
@@ -44,9 +43,9 @@ def print_board_and_info(env, reward, info, player_mode, human_color=None, white
     
     print(turn_info)
     if player_mode == 'ai_vs_ai':
-        if white_action is not None and current_player == 'Black':  # White just moved
+        if white_action is not None and current_player == 'white':
             print(f"White (AI) plays: {white_action}")
-        elif black_action is not None and current_player == 'White':  # Black just moved
+        elif black_action is not None and current_player == 'black':
             print(f"Black (AI) plays: {black_action}")
         else:
             print()  # Empty line if no move yet
@@ -56,14 +55,13 @@ def print_board_and_info(env, reward, info, player_mode, human_color=None, white
         print()  # Empty line for alignment
     
     print(f"Reward: {reward}, Move Count: {info.get('move_count', 'N/A')}")
-    sys.stdout.write('\n')
-    sys.stdout.flush()
+    #sys.stdout.write('\n')
+    #sys.stdout.flush()
 
 def main():
     env = ChessEnv()
     obs, info = env.reset()
     
-    clear_screen()
     mode = input("Choose game mode (1: Human vs AI, 2: AI vs AI): ").strip()
     if mode not in ['1', '2']:
         print("Invalid choice, defaulting to Human vs AI.")
@@ -77,7 +75,7 @@ def main():
             print("Invalid choice, defaulting to white.")
             human_color = 'w'
     
-    model = PPO.load("data/models/chess_model_checkpoint1")
+    model = PPO.load("data/models/chess_model_59999904_steps")
     model.policy.set_training_mode(False)  # Ensure testing mode
     
     done = False
@@ -114,6 +112,7 @@ def main():
     
     print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
     print("\nGame over!")
+    print(f"info white_won{info['white_won']} black_won{info['black_won']}")
     sleep(2)
 
 if __name__ == "__main__":
