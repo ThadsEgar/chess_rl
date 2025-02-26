@@ -202,11 +202,11 @@ class MCTSPPO(PPO):
         self.last_agent_step = [None] * self.n_envs
         if self.n_envs % 2 == 0:
             half = self.n_envs // 2
-            self.agent_record_player = np.array([0] * half + [0] * half)
+            self.agent_record_player = np.array([0] * half + [1] * half)
         else:
             half = self.n_envs // 2
             extra = np.random.choice([0, 1])
-            self.agent_record_player = np.array([0] * half + [0] * half + [extra])
+            self.agent_record_player = np.array([0] * half + [1] * half + [extra])
         self.opponent_policies = []
 
 def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
@@ -286,22 +286,20 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
 
         for e in range(self.n_envs):
             if dones[e]:
-                if infos[e]['is_draw']:
-                    final_reward = 0
-                elif infos[e]['white_won']:
-                    final_reward = -1  # Black lost
-                elif infos[e]['black_won']:
-                    final_reward = 1  # Black won
-                else:
-                    final_reward = 0  # Default
-                if self.last_agent_step[e] is not None:
+                if self.last_agent_step[e] is not None:  # Agent made at least one move
                     last_pos = self.last_agent_step[e]
-                    rollout_buffer.rewards[last_pos, e] = final_reward
-                    print(f"Env {e}: Outcome - Draw: {infos[e].get('is_draw', False)}, White won: {infos[e].get('white_won', False)}, Black won: {infos[e].get('black_won', False)}, Reward: {final_reward}")
-                # Reset environment and select opponent policy
+                    if infos[e].get('is_draw', False):
+                        rollout_buffer.rewards[last_pos, e] = 0
+                    elif infos[e].get('white_won', False):
+                        # Reward depends on who the agent is
+                        rollout_buffer.rewards[last_pos, e] = -1 if self.agent_record_player[e] == 0 else 1
+                    elif infos[e].get('black_won', False):
+                        rollout_buffer.rewards[last_pos, e] = 1 if self.agent_record_player[e] == 0 else -1
+                    else:
+                        rollout_buffer.rewards[last_pos, e] = 0  # Default
+                # Reset environment and update opponent policy
                 self._last_obs[e], _ = env.reset([e])
                 self.last_agent_step[e] = None
-                # Select new opponent policy with probability
                 if self.opponent_policies and np.random.rand() < self.opponent_pool_prob:
                     self.current_opponent_policies[e] = np.random.choice(self.opponent_policies)
                 else:
@@ -336,13 +334,13 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
                             tensorboard_log=tensorboard_log, 
                             verbose=1,
                             learning_rate=5e-5,
-                            n_steps=2048,
-                            batch_size=2048,
+                            n_steps=16384,
+                            batch_size=16384,
                             n_epochs=10,
                             gamma=0.99,
                             device=device,
                             clip_range=0.2,
-                            ent_coef=0.1,
+                            ent_coef=0.3,
                             vf_coef=0.5)
     else:
         model = MCTSPPO(
@@ -352,13 +350,13 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=5e-5,
-            n_steps=2048,
-            batch_size=2048,
+            n_steps=16384,
+            batch_size=16384,
             n_epochs=10,
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.1,
+            ent_coef=0.3,
             vf_coef=0.5
         )
     return model
