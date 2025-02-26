@@ -8,6 +8,7 @@ import os
 from collections import defaultdict, deque
 from src.mcts import create_mcts_ppo
 import multiprocessing
+import re
 
 def make_env(rank, seed=0):
     """
@@ -44,7 +45,7 @@ class OpponentPoolCallback(BaseCallback):
         self.init_load = False
 
     def _on_step(self):
-        if self.num_timesteps % self.update_interval == 0 or init_load is False:
+        if self.num_timesteps % self.update_interval == 0 or self.init_load is False:
             latest_paths = get_latest_checkpoints(self.checkpoint_folder)
             if latest_paths != self.current_opponent_paths:
                 opponent_policies = []
@@ -65,19 +66,27 @@ class OpponentPoolCallback(BaseCallback):
                     print(f"Updated opponent pool with {len(opponent_policies)} policies at timestep {self.num_timesteps}")
         return True  # Continue training
 
+from collections import defaultdict, deque
+import numpy as np
+from stable_baselines3.common.callbacks import BaseCallback
+
 class ChessMetricsCallback(BaseCallback):
     def __init__(self, verbose=0, log_freq=1_000):
         super().__init__(verbose)
-        self.log_freq = log_freq
+        self.log_freq = log_freq  # How often to log metrics
         self.game_outcomes = defaultdict(int)
-        self.move_counts = deque(maxlen=100)
+        self.move_counts = deque(maxlen=10_000)
         self.games_played = 0
         self.step_count = 0
-        
+        self.step_rewards = deque(maxlen=10_000)
     def _on_step(self) -> bool:
         self.step_count += 1
-        
-        # Count games every step
+
+        rewards = self.locals['rewards']  # Array of rewards for each environment
+        mean_step_reward = np.mean(rewards)
+        self.step_rewards.append(mean_step_reward)
+
+        # Existing game outcome tracking
         for info in self.locals['infos']:
             if info.get('is_terminal') or info.get('is_truncated'):
                 self.games_played += 1
@@ -89,15 +98,17 @@ class ChessMetricsCallback(BaseCallback):
                     self.game_outcomes['draws'] += 1
                 self.move_counts.append(info.get('move_count', 0))
 
+        # Log metrics only every log_freq steps
         if self.step_count % self.log_freq != 0:
             return True
-        
+
+        # Log existing game metrics
         if self.games_played > 0:
             white_win_rate = self.game_outcomes['white_wins'] / self.games_played
             black_win_rate = self.game_outcomes['black_wins'] / self.games_played
             draw_rate = self.game_outcomes['draws'] / self.games_played
             avg_moves = np.mean(list(self.move_counts)) if self.move_counts else 0.0
-            
+
             self.logger.record('win_rates/white_win_rate', white_win_rate)
             self.logger.record('win_rates/black_win_rate', black_win_rate)
             self.logger.record('win_rates/draw_rate', draw_rate)
@@ -107,7 +118,13 @@ class ChessMetricsCallback(BaseCallback):
             self.logger.record('game_outcomes/draws', self.game_outcomes['draws'])
             self.logger.record('game_stats/legal_moves_available', info.get('legal_moves_count', 0))
             self.logger.record('game_stats/position_repetitions', info.get('position_repetition_count', 0))
-        
+
+        # Log the mean step reward over the logging period
+        if self.step_rewards:
+            mean_step_reward_over_period = np.mean(self.step_rewards)
+            self.logger.record('rollout/mean_step_reward', mean_step_reward_over_period)
+            self.step_rewards = []  # Reset for the next logging period
+
         return True
 
 def main():
@@ -126,6 +143,14 @@ def main():
     env = VecMonitor(env)
     save_freq = 10_000_000 // NUM_ENVS
 
+    # Create the MCTS-PPO model
+    model = create_mcts_ppo(
+        env=env,
+        tensorboard_log=TENSORBOARD_LOG,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        checkpoint='data/models/chess_model_169999728_steps'
+    )
+
     # Create callbacks
     checkpoint_callback = CheckpointCallback(
         save_freq=save_freq,
@@ -139,14 +164,6 @@ def main():
         checkpoint_folder="data/models",
         update_interval=10_000_000,
         verbose=1
-    )
-
-    # Create the MCTS-PPO model
-    model = create_mcts_ppo(
-        env=env,
-        tensorboard_log=TENSORBOARD_LOG,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint='data/models/chess_model_checkpoint_4,6MG'
     )
 
     # Train the model with both callbacks

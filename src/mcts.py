@@ -202,11 +202,11 @@ class MCTSPPO(PPO):
         self.last_agent_step = [None] * self.n_envs
         if self.n_envs % 2 == 0:
             half = self.n_envs // 2
-            self.agent_record_player = np.array([0] * half + [1] * half)
+            self.agent_record_player = np.array([0] * half + [0] * half)
         else:
             half = self.n_envs // 2
             extra = np.random.choice([0, 1])
-            self.agent_record_player = np.array([0] * half + [1] * half + [extra])
+            self.agent_record_player = np.array([0] * half + [0] * half + [extra])
         self.opponent_policies = []
 
 def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
@@ -245,7 +245,7 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
             obs_e = self._last_obs[e]
             with torch.no_grad():
                 obs_tensor = torch.as_tensor(obs_e).unsqueeze(0).to(self.device)
-                action, _, _ = opponent_policy.forward(obs_tensor, deterministic=True)
+                action, _, _ = opponent_policy.forward(obs_tensor, deterministic=False)
             actions[e] = action.item()
 
         # Step the environment
@@ -284,18 +284,20 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
             batch_log_probs
         )
 
-        # Handle episode ends and assign rewards
         for e in range(self.n_envs):
             if dones[e]:
-                if current_players[e] != self.agent_record_player[e]:
-                    if infos[e].get("is_draw", False):
-                        if self.last_agent_step[e] is not None:
-                            last_pos = self.last_agent_step[e]
-                            rollout_buffer.rewards[last_pos, e] = 0
-                    else:
-                        if self.last_agent_step[e] is not None:
-                            last_pos = self.last_agent_step[e]
-                            rollout_buffer.rewards[last_pos, e] = -1
+                if infos[e]['is_draw']:
+                    final_reward = 0
+                elif infos[e]['white_won']:
+                    final_reward = -1  # Black lost
+                elif infos[e]['black_won']:
+                    final_reward = 1  # Black won
+                else:
+                    final_reward = 0  # Default
+                if self.last_agent_step[e] is not None:
+                    last_pos = self.last_agent_step[e]
+                    rollout_buffer.rewards[last_pos, e] = final_reward
+                    print(f"Env {e}: Outcome - Draw: {infos[e].get('is_draw', False)}, White won: {infos[e].get('white_won', False)}, Black won: {infos[e].get('black_won', False)}, Reward: {final_reward}")
                 # Reset environment and select opponent policy
                 self._last_obs[e], _ = env.reset([e])
                 self.last_agent_step[e] = None
@@ -334,8 +336,8 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
                             tensorboard_log=tensorboard_log, 
                             verbose=1,
                             learning_rate=5e-5,
-                            n_steps=16384,
-                            batch_size=16384,
+                            n_steps=2048,
+                            batch_size=2048,
                             n_epochs=10,
                             gamma=0.99,
                             device=device,
@@ -350,8 +352,8 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=5e-5,
-            n_steps=16384,
-            batch_size=16384,
+            n_steps=2048,
+            batch_size=2048,
             n_epochs=10,
             gamma=0.99,
             device=device,
