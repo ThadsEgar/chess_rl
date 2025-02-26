@@ -19,8 +19,54 @@ def make_env(rank, seed=0):
         return env
     return _init
 
+def get_latest_checkpoints(folder_path, num_checkpoints=2, pattern=r'.*\.zip'):
+    files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and re.match(pattern, f)]
+    files.sort()  # Sort alphabetically; assumes this reflects save order
+    latest_files = files[-num_checkpoints:]
+    return [os.path.join(folder_path, f) for f in latest_files]
+
+class OpponentPoolCallback(BaseCallback):
+    def __init__(self, model, checkpoint_folder, update_interval, verbose=0):
+        """
+        Callback to update the opponent pool with the latest saved models.
+        
+        Args:
+            model: The RL model instance (e.g., MCTSPPO or PPO).
+            checkpoint_folder (str): Folder where the save callback stores models.
+            update_interval (int): Timesteps between folder checks (e.g., 100000).
+            verbose (int): Verbosity level (0 = silent, 1 = print updates).
+        """
+        super().__init__(verbose)
+        self.model = model
+        self.checkpoint_folder = checkpoint_folder
+        self.update_interval = update_interval
+        self.current_opponent_paths = []  # Tracks the current set of model paths
+        self.init_load = False
+
+    def _on_step(self):
+        if self.num_timesteps % self.update_interval == 0 or init_load is False:
+            latest_paths = get_latest_checkpoints(self.checkpoint_folder)
+            if latest_paths != self.current_opponent_paths:
+                opponent_policies = []
+                for path in latest_paths:
+                    # Load the policy from the checkpoint
+                    opponent_model = self.model.__class__.load(
+                        path,
+                        env=self.model.env,
+                        device=self.model.device
+                    )
+                    opponent_policy = opponent_model.policy
+                    opponent_policy.set_training_mode(False)  # Disable training mode
+                    opponent_policies.append(opponent_policy)
+                # Update the model's opponent pool
+                self.model.opponent_policies = opponent_policies
+                self.current_opponent_paths = latest_paths
+                if self.verbose > 0:
+                    print(f"Updated opponent pool with {len(opponent_policies)} policies at timestep {self.num_timesteps}")
+        return True  # Continue training
+
 class ChessMetricsCallback(BaseCallback):
-    def __init__(self, verbose=0, log_freq=1):
+    def __init__(self, verbose=0, log_freq=1_000):
         super().__init__(verbose)
         self.log_freq = log_freq
         self.game_outcomes = defaultdict(int)
@@ -88,13 +134,19 @@ def main():
     )
 
     metrics_callback = ChessMetricsCallback()
+    opponent_callback = OpponentPoolCallback(
+        model=model,
+        checkpoint_folder="data/models",
+        update_interval=10_000_000,
+        verbose=1
+    )
 
     # Create the MCTS-PPO model
     model = create_mcts_ppo(
         env=env,
         tensorboard_log=TENSORBOARD_LOG,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint='data/models/chess_model_59999904_steps'
+        checkpoint='data/models/chess_model_checkpoint_4,6MG'
     )
 
     # Train the model with both callbacks
@@ -102,7 +154,7 @@ def main():
     try:
         model.learn(
             total_timesteps=total_timesteps,
-            callback=[checkpoint_callback, metrics_callback]
+            callback=[checkpoint_callback, metrics_callback, opponent_callback]
         )
     finally:
         # Make sure to close the environments!

@@ -207,6 +207,7 @@ class MCTSPPO(PPO):
             half = self.n_envs // 2
             extra = np.random.choice([0, 1])
             self.agent_record_player = np.array([0] * half + [1] * half + [extra])
+        self.opponent_policies = []
 
 def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
     assert self._last_obs is not None, "No previous observation"
@@ -214,29 +215,55 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
     rollout_buffer.reset()
 
     while n_steps < n_rollout_steps:
-        with torch.no_grad():
-            obs_tensor = torch.as_tensor(self._last_obs).to(self.device)
-            actions, values, log_probs = self.policy.forward(obs_tensor)
-        actions = actions.cpu().numpy()
+        # Prepare to select actions
+        actions = np.zeros(self.n_envs, dtype=int)
+        batch_values = torch.zeros(self.n_envs, device=self.device)
+        batch_log_probs = torch.zeros(self.n_envs, device=self.device)
+
+        # Identify agent's and opponent's turns
+        current_players = env.get_attr("current_player")
+        if not isinstance(current_players, list):
+            current_players = [current_players] * self.n_envs
+        agent_turn_indices = [e for e in range(self.n_envs) if current_players[e] == self.agent_record_player[e]]
+        opponent_turn_indices = [e for e in range(self.n_envs) if current_players[e] != self.agent_record_player[e]]
+
+        # Compute actions for agent's turns
+        if agent_turn_indices:
+            agent_obs = self._last_obs[agent_turn_indices]
+            with torch.no_grad():
+                obs_tensor = torch.as_tensor(agent_obs).to(self.device)
+                agent_actions, agent_values, agent_log_probs = self.policy.forward(obs_tensor)
+            agent_actions = agent_actions.cpu().numpy()
+            for i, e in enumerate(agent_turn_indices):
+                actions[e] = agent_actions[i]
+                batch_values[e] = agent_values[i]
+                batch_log_probs[e] = agent_log_probs[i]
+
+        # Compute actions for opponent's turns
+        for e in opponent_turn_indices:
+            opponent_policy = self.current_opponent_policies[e]
+            obs_e = self._last_obs[e]
+            with torch.no_grad():
+                obs_tensor = torch.as_tensor(obs_e).unsqueeze(0).to(self.device)
+                action, _, _ = opponent_policy.forward(obs_tensor, deterministic=True)
+            actions[e] = action.item()
 
         # Step the environment
         new_obs, rewards, dones, infos = env.step(actions)
         if not isinstance(infos, list):
-            infos = [infos]
+            infos = [infos] * self.n_envs
         current_players = [info.get("current_player", 0) for info in infos]
-        print('help')
+
         # Update callback
         callback.update_locals(locals())
         if not callback.on_step():
             return False
 
         # Prepare full batch data for all environments
-        batch_obs = np.zeros_like(self._last_obs)  # Shape: (n_envs, obs_dim)
-        batch_actions = np.zeros(self.n_envs, dtype=int)  # Assuming discrete actions
+        batch_obs = np.zeros_like(self._last_obs)
+        batch_actions = np.zeros(self.n_envs, dtype=int)
         batch_rewards = np.zeros(self.n_envs, dtype=float)
         batch_episode_starts = np.zeros(self.n_envs, dtype=bool)
-        batch_values = torch.zeros_like(values)
-        batch_log_probs = torch.zeros_like(log_probs)
 
         # Fill in data where the agent is acting
         for e in range(self.n_envs):
@@ -245,36 +272,42 @@ def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollo
                 batch_actions[e] = actions[e]
                 batch_rewards[e] = rewards[e]
                 batch_episode_starts[e] = self._last_episode_starts[e]
-                batch_values[e] = values[e]
-                batch_log_probs[e] = log_probs[e]
                 self.last_agent_step[e] = rollout_buffer.pos
 
         # Add full batch to rollout buffer
         rollout_buffer.add(
             batch_obs,
-            batch_actions.reshape(self.n_envs, 1),  # Shape: (n_envs, 1)
+            batch_actions.reshape(self.n_envs, 1),
             batch_rewards,
             batch_episode_starts,
             batch_values,
             batch_log_probs
         )
-        print(self.agent_record_player, flush=True)
+
+        # Handle episode ends and assign rewards
         for e in range(self.n_envs):
-            if dones[e] and current_players[e] != self.agent_record_player[e]:
-                if self.last_agent_step[e] is not None:
-                    last_pos = self.last_agent_step[e]
-                    rollout_buffer.rewards[last_pos, e] = -1
-                    print(self.agent_record_player[e], f'last pos {last_pos}', flush=True)
-                    print(rollout_buffer)
+            if dones[e]:
+                if current_players[e] != self.agent_record_player[e]:
+                    if infos[e].get("is_draw", False):
+                        if self.last_agent_step[e] is not None:
+                            last_pos = self.last_agent_step[e]
+                            rollout_buffer.rewards[last_pos, e] = 0
+                    else:
+                        if self.last_agent_step[e] is not None:
+                            last_pos = self.last_agent_step[e]
+                            rollout_buffer.rewards[last_pos, e] = -1
+                # Reset environment and select opponent policy
+                self._last_obs[e], _ = env.reset([e])
+                self.last_agent_step[e] = None
+                # Select new opponent policy with probability
+                if self.opponent_policies and np.random.rand() < self.opponent_pool_prob:
+                    self.current_opponent_policies[e] = np.random.choice(self.opponent_policies)
+                else:
+                    self.current_opponent_policies[e] = self.policy
 
         # Update state
         self._last_obs = new_obs
         self._last_episode_starts = dones
-        for e in range(self.n_envs):
-            if dones[e]:
-                self._last_obs[e], _ = env.reset([e])  # Reset individual env (adjust if needed)
-                self.last_agent_step[e] = None
-
         self.num_timesteps += self.n_envs
         n_steps += 1
 
@@ -301,14 +334,14 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
                             tensorboard_log=tensorboard_log, 
                             verbose=1,
                             learning_rate=5e-5,
-                            n_steps=32,
-                            batch_size=32,
+                            n_steps=16384,
+                            batch_size=16384,
                             n_epochs=10,
                             gamma=0.99,
                             device=device,
                             clip_range=0.2,
-                            ent_coef=0.05,
-                            vf_coef=1.0)
+                            ent_coef=0.1,
+                            vf_coef=0.5)
     else:
         model = MCTSPPO(
             MCTSMaskableActorCriticPolicy,
@@ -317,13 +350,13 @@ def create_mcts_ppo(env, tensorboard_log, device='cuda', checkpoint=None):
             policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=5e-5,
-            n_steps=32,
-            batch_size=32,
+            n_steps=16384,
+            batch_size=16384,
             n_epochs=10,
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.05,
-            vf_coef=1.0
+            ent_coef=0.1,
+            vf_coef=0.5
         )
     return model
