@@ -126,8 +126,16 @@ def main():
     print(f"Using {device} device")
     
     # Create vectorized environment
-    n_envs = 48  # Increased from previous value
-    env = make_vec_env(make_env, n_envs=n_envs, seed=0, vec_env_cls=SubprocVecEnv)
+    n_envs = 48  # Increased for better parallelization
+    
+    # Set up multiprocessing
+    multiprocessing.set_start_method('spawn', force=True)
+    
+    # Create environment functions
+    envs = [make_env(i) for i in range(n_envs)]
+    
+    # Create vectorized environment
+    env = SubprocVecEnv(envs)
     env = VecMonitor(env)
     
     # Create or load model

@@ -224,7 +224,7 @@ class MCTS:
         self.policy_net = policy_net
         self.num_simulations = num_simulations
         self.c_puct = c_puct
-        self.device = policy_net.device
+        self.device = getattr(policy_net, 'device', 'cpu')
         
     def search(self, state):
         root = Node(state)
@@ -258,43 +258,57 @@ class MCTS:
             # Prepare batch for network evaluation
             batch_obs = []
             for node, _ in leaf_nodes:
-                from custom_gym.chess_gym import canonical_encode_board_for_cnn
-                board_obs = canonical_encode_board_for_cnn(node.state)
-                board_obs_flat = board_obs.flatten()
-                legal_actions = node.state.legal_actions()
-                mask = np.zeros(node.state.num_actions(), dtype=np.float32)
-                mask[legal_actions] = 1.0
-                obs = np.concatenate([board_obs_flat, mask])
-                batch_obs.append(obs)
+                try:
+                    from custom_gym.chess_gym import canonical_encode_board_for_cnn
+                    board_obs = canonical_encode_board_for_cnn(node.state)
+                    board_obs_flat = board_obs.flatten()
+                    legal_actions = node.state.legal_actions()
+                    mask = np.zeros(node.state.num_actions(), dtype=np.float32)
+                    mask[legal_actions] = 1.0
+                    obs = np.concatenate([board_obs_flat, mask])
+                    batch_obs.append(obs)
+                except Exception as e:
+                    print(f"Error preparing observation: {e}")
+                    continue
             
+            if not batch_obs:
+                continue
+                
             # Convert to tensor and evaluate batch
-            with torch.no_grad():
-                batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
-                batch_values = []
-                batch_probs = []
-                
-                # Process in smaller chunks if needed
-                for i in range(0, len(batch_obs), 4):  # Process 4 at a time to avoid memory issues
-                    chunk = batch_tensor[i:i+4]
-                    actions, values, _ = self.policy_net(chunk, deterministic=False)
+            try:
+                with torch.no_grad():
+                    batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
+                    batch_values = []
+                    batch_probs = []
                     
-                    # Extract action probabilities
-                    features = self.policy_net.extract_features(chunk)
-                    latent_pi, _ = self.policy_net.mlp_extractor(features)
-                    logits = self.policy_net.action_net(latent_pi)
+                    # Process in smaller chunks if needed
+                    for i in range(0, len(batch_obs), 4):  # Process 4 at a time to avoid memory issues
+                        chunk = batch_tensor[i:i+4]
+                        
+                        # Extract features
+                        features = self.policy_net.extract_features(chunk)
+                        
+                        # Get values
+                        values = self.policy_net.value_net(features)
+                        batch_values.extend(values.cpu().numpy())
+                        
+                        # Get action probabilities
+                        latent_pi = self.policy_net.policy_net(features)
+                        
+                        # Apply action masking
+                        board_flat_size = self.policy_net.board_flat_size
+                        action_masks = chunk[:, board_flat_size:]
+                        illegal_masks = (action_masks < 0.5)
+                        logits = latent_pi.masked_fill(illegal_masks, -1e8)
+                        probs = F.softmax(logits, dim=-1)
+                        
+                        batch_probs.append(probs.cpu())
                     
-                    # Apply action masking
-                    board_flat_size = self.policy_net.board_flat_size
-                    action_masks = chunk[:, board_flat_size:]
-                    illegal_masks = (action_masks < 0.5)
-                    logits = logits.masked_fill(illegal_masks, -1e8)
-                    probs = F.softmax(logits, dim=-1)
-                    
-                    batch_values.extend(values.cpu().numpy())
-                    batch_probs.append(probs.cpu())
-                
-                if batch_probs:
-                    batch_probs = torch.cat(batch_probs, dim=0)
+                    if batch_probs:
+                        batch_probs = torch.cat(batch_probs, dim=0)
+            except Exception as e:
+                print(f"Error in batch evaluation: {e}")
+                continue
             
             # Expansion and backpropagation for each leaf node
             for i, (node, search_path) in enumerate(leaf_nodes):
@@ -305,17 +319,21 @@ class MCTS:
                 probs = batch_probs[i] if i < len(batch_probs) else None
                 
                 # Expand node with evaluated probabilities
-                legal_actions = node.state.legal_actions()
-                for action in legal_actions:
-                    if action not in node.children and probs is not None:
-                        next_state = node.state.clone()
-                        next_state.apply_action(action)
-                        node.children[action] = Node(
-                            state=next_state,
-                            prior=probs[action].item(),
-                            parent=node,
-                            root_player=node.root_player
-                        )
+                try:
+                    legal_actions = node.state.legal_actions()
+                    for action in legal_actions:
+                        if action not in node.children and probs is not None:
+                            next_state = node.state.clone()
+                            next_state.apply_action(action)
+                            node.children[action] = Node(
+                                state=next_state,
+                                prior=probs[action].item(),
+                                parent=node,
+                                root_player=node.root_player
+                            )
+                except Exception as e:
+                    print(f"Error expanding node: {e}")
+                    continue
                 
                 # Backpropagate value
                 for path_node in reversed(search_path):
@@ -379,8 +397,15 @@ class MCTSPPO(PPO):
         if hasattr(env, 'env_method'):
             try:
                 current_players = env.env_method('get_current_player')
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Warning: Could not get current player: {e}")
+                
+        # Initialize MCTS for the policy if not already done
+        if self.policy.mcts is None:
+            self.policy.mcts = MCTS(self.policy, num_simulations=50, c_puct=2.0)  # Use fewer simulations during training
+            
+        # Flag to determine whether to use MCTS during training
+        use_mcts_in_training = False  # Set to True to enable MCTS during training
 
         while n_steps < n_rollout_steps:
             actions = np.zeros(self.n_envs, dtype=int)
@@ -393,53 +418,143 @@ class MCTSPPO(PPO):
 
             # Agent's turns - process in a single batch for better GPU utilization
             if agent_turn_indices:
-                # Extract board and action mask for agent's turns from batched arrays
-                agent_boards = self._last_obs['board'][agent_turn_indices]
-                agent_masks = self._last_obs['action_mask'][agent_turn_indices]
-                
-                # Convert to tensors
-                board_tensor = torch.as_tensor(agent_boards).to(self.device)
-                mask_tensor = torch.as_tensor(agent_masks).to(self.device)
-                obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
-                
-                with torch.no_grad():
-                    agent_actions, agent_values, agent_log_probs = self.policy(obs_dict)
-                
-                agent_actions = agent_actions.cpu().numpy()
-                for i, e in enumerate(agent_turn_indices):
-                    actions[e] = agent_actions[i]
-                    batch_values[e] = agent_values[i]
-                    batch_log_probs[e] = agent_log_probs[i]
+                if not use_mcts_in_training:
+                    try:
+                        # Standard policy-based approach (faster)
+                        # Extract board and action mask for agent's turns from batched arrays
+                        agent_boards = self._last_obs['board'][agent_turn_indices]
+                        agent_masks = self._last_obs['action_mask'][agent_turn_indices]
+                        
+                        # Convert to tensors
+                        board_tensor = torch.as_tensor(agent_boards).to(self.device)
+                        mask_tensor = torch.as_tensor(agent_masks).to(self.device)
+                        obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
+                        
+                        with torch.no_grad():
+                            agent_actions, agent_values, agent_log_probs = self.policy(obs_dict)
+                        
+                        agent_actions = agent_actions.cpu().numpy()
+                        for i, e in enumerate(agent_turn_indices):
+                            actions[e] = agent_actions[i]
+                            batch_values[e] = agent_values[i]
+                            batch_log_probs[e] = agent_log_probs[i]
+                            # Record this as an agent step for reward assignment
+                            self.last_agent_step[e] = rollout_buffer.pos
+                    except Exception as e:
+                        print(f"Error in agent policy evaluation: {e}")
+                        # Fallback to random actions
+                        for e in agent_turn_indices:
+                            legal_actions = env.get_attr('state', indices=[e])[0].legal_actions()
+                            if legal_actions:
+                                actions[e] = np.random.choice(legal_actions)
+                else:
+                    # MCTS-based approach (stronger but slower)
+                    for i, e in enumerate(agent_turn_indices):
+                        try:
+                            # Get the state from the environment
+                            state = env.get_attr('state', indices=[e])[0]
+                            
+                            # Use MCTS to select action
+                            action = self.policy.mcts.search(state)
+                            actions[e] = action
+                            
+                            # We still need values and log probs for PPO
+                            # Extract observation for this specific environment
+                            obs_e = {
+                                'board': self._last_obs['board'][e:e+1],
+                                'action_mask': self._last_obs['action_mask'][e:e+1]
+                            }
+                            
+                            # Convert to tensors
+                            board_tensor = torch.as_tensor(obs_e['board']).to(self.device)
+                            mask_tensor = torch.as_tensor(obs_e['action_mask']).to(self.device)
+                            obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
+                            
+                            with torch.no_grad():
+                                # Get value from policy
+                                features = self.policy.extract_features(obs_dict)
+                                value = self.policy.value_net(features)
+                                batch_values[e] = value
+                                
+                                # Get log prob for the selected action
+                                latent_pi = self.policy.policy_net(features)
+                                action_mask = self.policy._get_action_mask(obs_dict)
+                                illegal_actions_mask = (action_mask < 0.5)
+                                logits = latent_pi.masked_fill(illegal_actions_mask, -1e8)
+                                distribution = torch.distributions.Categorical(logits=logits)
+                                action_tensor = torch.tensor([action], device=self.device)
+                                log_prob = distribution.log_prob(action_tensor)
+                                batch_log_probs[e] = log_prob
+                            
+                            # Record this as an agent step for reward assignment
+                            self.last_agent_step[e] = rollout_buffer.pos
+                        except Exception as e:
+                            print(f"Error in MCTS evaluation for env {i}: {e}")
+                            # Fallback to random action
+                            legal_actions = env.get_attr('state', indices=[e])[0].legal_actions()
+                            if legal_actions:
+                                actions[e] = np.random.choice(legal_actions)
 
             # Opponent's turns - batch process when possible
             if opponent_turn_indices:
-                policy_groups = {}
-                for e in opponent_turn_indices:
-                    policy = self.current_opponent_policies[e]
-                    if policy not in policy_groups:
-                        policy_groups[policy] = []
-                    policy_groups[policy].append(e)
-                
-                for policy, indices in policy_groups.items():
-                    opp_boards = self._last_obs['board'][indices]
-                    opp_masks = self._last_obs['action_mask'][indices]
+                try:
+                    # Group by opponent policy for batch processing
+                    policy_groups = {}
+                    for e in opponent_turn_indices:
+                        policy = self.current_opponent_policies[e]
+                        if policy not in policy_groups:
+                            policy_groups[policy] = []
+                        policy_groups[policy].append(e)
                     
-                    board_tensor = torch.as_tensor(opp_boards).to(self.device)
-                    mask_tensor = torch.as_tensor(opp_masks).to(self.device)
-                    obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
-                    
-                    with torch.no_grad():
-                        opp_actions, _, _ = policy(obs_dict, deterministic=False)
-                        opp_actions = opp_actions.cpu().numpy()
-                    
-                    for i, e in enumerate(indices):
-                        actions[e] = opp_actions[i]
+                    # Process each policy group as a batch
+                    for policy, indices in policy_groups.items():
+                        # Extract observations for this policy group
+                        opp_boards = self._last_obs['board'][indices]
+                        opp_masks = self._last_obs['action_mask'][indices]
+                        
+                        # Convert to tensors
+                        board_tensor = torch.as_tensor(opp_boards).to(self.device)
+                        mask_tensor = torch.as_tensor(opp_masks).to(self.device)
+                        obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
+                        
+                        with torch.no_grad():
+                            opp_actions, _, _ = policy(obs_dict, deterministic=False)
+                            opp_actions = opp_actions.cpu().numpy()
+                        
+                        # Assign actions
+                        for i, e in enumerate(indices):
+                            actions[e] = opp_actions[i]
+                except Exception as e:
+                    print(f"Error in opponent policy evaluation: {e}")
+                    # Fallback to random actions for opponents
+                    for e in opponent_turn_indices:
+                        try:
+                            legal_actions = env.get_attr('state', indices=[e])[0].legal_actions()
+                            if legal_actions:
+                                actions[e] = np.random.choice(legal_actions)
+                        except Exception:
+                            # Last resort fallback
+                            actions[e] = 0
 
-            new_obs, rewards, dones, infos = env.step(actions)
-            if not isinstance(infos, list):
-                infos = [infos] * self.n_envs
-                    
-            current_players = [info.get("current_player", 0) for info in infos]
+            # Step environment
+            try:
+                new_obs, rewards, dones, infos = env.step(actions)
+                if not isinstance(infos, list):
+                    infos = [infos] * self.n_envs
+                        
+                current_players = [info.get("current_player", 0) for info in infos]
+            except Exception as e:
+                print(f"Error stepping environment: {e}")
+                # This is a critical error, we might need to reset
+                try:
+                    new_obs = env.reset()
+                    rewards = np.zeros(self.n_envs)
+                    dones = np.ones(self.n_envs, dtype=bool)
+                    infos = [{} for _ in range(self.n_envs)]
+                    current_players = [0 for _ in range(self.n_envs)]
+                except Exception as reset_error:
+                    print(f"Error resetting environment: {reset_error}")
+                    return False
 
             callback.update_locals(locals())
             if not callback.on_step():
@@ -475,11 +590,14 @@ class MCTSPPO(PPO):
                         else:
                             rollout_buffer.rewards[last_pos, e] = 0
                         
-                        new_obs_e, new_info = env.reset(indices=[e])
-                        current_players[e] = 1
-                        self._last_obs[e] = new_obs[e]
-                        self.last_agent_step[e] = None
-                        current_players[e] = new_info.get("current_player", 0)
+                        try:
+                            new_obs_e, new_info = env.reset(indices=[e])
+                            current_players[e] = 1
+                            self._last_obs[e] = new_obs[e]
+                            self.last_agent_step[e] = None
+                            current_players[e] = new_info.get("current_player", 0)
+                        except Exception as e:
+                            print(f"Error resetting environment {e}: {e}")
                     else:
                         current_players[e] = infos[e].get("current_player", current_players[e])           
                     
@@ -496,13 +614,20 @@ class MCTSPPO(PPO):
             if rollout_buffer.pos >= n_rollout_steps:
                 break
 
-        with torch.no_grad():
-            obs_tensor = {
-                key: torch.as_tensor(value, device=self.device)
-                for key, value in self._last_obs.items()
-            }
-            last_values = self.policy.predict_values(obs_tensor)
-        rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
+        try:
+            with torch.no_grad():
+                obs_tensor = {
+                    key: torch.as_tensor(value, device=self.device)
+                    for key, value in self._last_obs.items()
+                }
+                # Now pass the tensor dictionary to predict_values
+                last_values = self.policy.predict_values(obs_tensor)
+            rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
+        except Exception as e:
+            print(f"Error computing returns and advantage: {e}")
+            # Try to recover by using zero values
+            last_values = torch.zeros(self.n_envs, device=self.device)
+            rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
         return True
 
