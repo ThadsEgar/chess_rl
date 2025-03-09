@@ -11,6 +11,7 @@ from src.mcts import create_mcts_ppo
 import multiprocessing
 import re
 import sys
+import argparse
 
 def make_env(rank, seed=0):
     def _init():
@@ -166,17 +167,38 @@ class ChessMetricsCallback(BaseCallback):
 
         return True
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Train a chess reinforcement learning model')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to a checkpoint to continue training from')
+    parser.add_argument('--n_envs', type=int, default=48,
+                        help='Number of parallel environments to use')
+    parser.add_argument('--device', type=str, default=None,
+                        help='Device to use (cuda or cpu). Default: auto-detect')
+    parser.add_argument('--total_timesteps', type=int, default=int(1e8),
+                        help='Total number of timesteps to train for')
+    parser.add_argument('--save_freq', type=int, default=50000,
+                        help='Frequency (in timesteps) to save model checkpoints')
+    return parser.parse_args()
+
 def main():
+    # Parse command line arguments
+    args = parse_arguments()
+    
     # Set up logging directory
     os.makedirs("data/logs", exist_ok=True)
     os.makedirs("data/models", exist_ok=True)
     
     # Set device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.device:
+        device = args.device
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using {device} device")
     
     # Create vectorized environment
-    n_envs = 48  # Increased for better parallelization
+    n_envs = args.n_envs
+    print(f"Using {n_envs} parallel environments")
     
     # Set up multiprocessing
     multiprocessing.set_start_method('spawn', force=True)
@@ -188,10 +210,52 @@ def main():
     env = SubprocVecEnv(envs)
     env = VecMonitor(env)
     
-    # Create or load model
-    checkpoint = None
-    if len(sys.argv) > 1:
+    # Get checkpoint path
+    checkpoint = args.checkpoint
+    
+    # If no checkpoint specified via args but provided as positional argument (for backward compatibility)
+    if checkpoint is None and len(sys.argv) > 1 and not sys.argv[1].startswith('--'):
         checkpoint = sys.argv[1]
+        
+    if checkpoint:
+        print(f"Loading checkpoint: {checkpoint}")
+        # Check if the checkpoint exists
+        if not os.path.exists(checkpoint):
+            # Try adding .zip extension if not present
+            if not checkpoint.endswith('.zip'):
+                checkpoint_with_ext = f"{checkpoint}.zip"
+                if os.path.exists(checkpoint_with_ext):
+                    checkpoint = checkpoint_with_ext
+                    print(f"Using checkpoint with .zip extension: {checkpoint}")
+                else:
+                    # Try looking in data/models directory
+                    models_dir_path = os.path.join("data", "models", checkpoint)
+                    if os.path.exists(models_dir_path):
+                        checkpoint = models_dir_path
+                        print(f"Found checkpoint in data/models: {checkpoint}")
+                    else:
+                        models_dir_path_with_ext = f"{models_dir_path}.zip"
+                        if os.path.exists(models_dir_path_with_ext):
+                            checkpoint = models_dir_path_with_ext
+                            print(f"Found checkpoint in data/models with .zip extension: {checkpoint}")
+                        else:
+                            print(f"Warning: Checkpoint {checkpoint} not found. Checking for available checkpoints...")
+                            # List available checkpoints
+                            available_checkpoints = []
+                            for file in os.listdir("data/models"):
+                                if file.endswith(".zip"):
+                                    available_checkpoints.append(os.path.join("data", "models", file))
+                            if available_checkpoints:
+                                print("Available checkpoints:")
+                                for cp in available_checkpoints:
+                                    print(f"  - {cp}")
+                                # Use the latest checkpoint
+                                latest_checkpoint = max(available_checkpoints, key=os.path.getmtime)
+                                print(f"Using latest checkpoint: {latest_checkpoint}")
+                                checkpoint = latest_checkpoint
+                            else:
+                                print("No checkpoints found. Starting training from scratch.")
+                                checkpoint = None
     
     # Use CNN-based policy
     model = create_cnn_mcts_ppo(
@@ -203,7 +267,7 @@ def main():
     
     # Set up callbacks
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000,
+        save_freq=args.save_freq,
         save_path="data/models/",
         name_prefix="chess_model",
         save_replay_buffer=False,
@@ -224,7 +288,7 @@ def main():
     
     # Train the model
     model.learn(
-        total_timesteps=int(1e8),
+        total_timesteps=args.total_timesteps,
         callback=[checkpoint_callback, metrics_callback, opponent_callback],
         progress_bar=True
     )
