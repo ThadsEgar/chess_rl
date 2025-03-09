@@ -433,13 +433,13 @@ class MCTSPPO(PPO):
                         with torch.no_grad():
                             agent_actions, agent_values, agent_log_probs = self.policy(obs_dict)
                         
-                        agent_actions = agent_actions.cpu().numpy()
-                        for i, e in enumerate(agent_turn_indices):
-                            actions[e] = agent_actions[i]
-                            batch_values[e] = agent_values[i]
-                            batch_log_probs[e] = agent_log_probs[i]
-                            # Record this as an agent step for reward assignment
-                            self.last_agent_step[e] = rollout_buffer.pos
+                            agent_actions = agent_actions.cpu().numpy()
+                            for i, e in enumerate(agent_turn_indices):
+                                actions[e] = agent_actions[i]
+                                batch_values[e] = agent_values[i]
+                                batch_log_probs[e] = agent_log_probs[i]
+                                # Record this as an agent step for reward assignment
+                                self.last_agent_step[e] = rollout_buffer.pos
                     except Exception as e:
                         print(f"Error in agent policy evaluation: {e}")
                         # Fallback to random actions
@@ -638,9 +638,18 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
         
     policy_kwargs = {
         'activation_fn': nn.ReLU,
-        'net_arch': None,
-        'normalize_images': False,
+        'net_arch': None,  # Use custom CNN architecture
+        'normalize_images': False,  # Already normalized in our preprocessing
     }
+    
+    n_steps = 2048
+    n_envs = env.num_envs
+    total_steps = n_steps * n_envs
+    
+    batch_size = min(2048, n_steps)
+    
+    print(f"Training with {n_envs} environments, {n_steps} steps per environment")
+    print(f"Total steps per iteration: {total_steps}, batch size: {batch_size}")
     
     if checkpoint:
         print(f'Checkpoint: {checkpoint} loaded')
@@ -651,15 +660,14 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             tensorboard_log=tensorboard_log, 
             verbose=1,
             learning_rate=3e-5,
-            n_steps=8192,
-            batch_size=8192,
-            n_epochs=4,
+            n_steps=n_steps,        # Steps to collect per environment
+            batch_size=batch_size,  # Batch size for updates
+            n_epochs=4,             # Number of passes through the batch
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.01,
+            ent_coef=0.05,
             vf_coef=0.5,
-            n_minibatches=16,
             policy_kwargs=policy_kwargs,
         )
     else:
@@ -670,15 +678,14 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=3e-5,
-            n_steps=8192,
-            batch_size=8192,
-            n_epochs=4,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            n_epochs=4, 
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.01,
+            ent_coef=0.05,
             vf_coef=0.5,
-            n_minibatches=16,
         )
     
     return model
