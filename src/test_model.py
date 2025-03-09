@@ -2,6 +2,7 @@ from time import sleep
 import os
 import sys
 import numpy as np
+import argparse
 from stable_baselines3 import PPO
 from custom_gym.chess_gym import ChessEnv
 
@@ -55,25 +56,57 @@ def print_board_and_info(env, reward, info, player_mode, human_color=None, white
     #sys.stdout.write('\n')
     #sys.stdout.flush()
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Test a trained chess model')
+    parser.add_argument('--model', type=str, default="data/models/chess_model_59999904_steps",
+                        help='Path to the trained model file')
+    parser.add_argument('--mode', type=str, choices=['human_vs_ai', 'ai_vs_ai'], default='human_vs_ai',
+                        help='Game mode: human_vs_ai or ai_vs_ai')
+    parser.add_argument('--color', type=str, choices=['w', 'b'], default='w',
+                        help='Human player color (w for white, b for black)')
+    parser.add_argument('--delay', type=float, default=0.5,
+                        help='Delay between AI moves in seconds')
+    return parser.parse_args()
+
 def main():
+    # Parse command line arguments
+    args = parse_arguments()
+    
     env = ChessEnv()
     obs, info = env.reset()
     
-    mode = input("Choose game mode (1: Human vs AI, 2: AI vs AI): ").strip()
-    if mode not in ['1', '2']:
-        print("Invalid choice, defaulting to Human vs AI.")
-        mode = '1'
+    # If no command line arguments, ask interactively
+    if len(sys.argv) == 1:
+        mode = input("Choose game mode (1: Human vs AI, 2: AI vs AI): ").strip()
+        player_mode = 'human_vs_ai' if mode == '1' else 'ai_vs_ai'
+        
+        human_color = None
+        if player_mode == 'human_vs_ai':
+            human_color = input("Choose your color (w for white, b for black): ").strip().lower()
+            if human_color not in ['w', 'b']:
+                print("Invalid choice, defaulting to white.")
+                human_color = 'w'
+                
+        model_path = input("Enter path to model (or press Enter for default): ").strip()
+        if not model_path:
+            model_path = "data/models/chess_model_59999904_steps"
+    else:
+        # Use command line arguments
+        player_mode = args.mode
+        human_color = args.color if player_mode == 'human_vs_ai' else None
+        model_path = args.model
     
-    player_mode = 'human_vs_ai' if mode == '1' else 'ai_vs_ai'
-    human_color = None
-    if player_mode == 'human_vs_ai':
-        human_color = input("Choose your color (w for white, b for black): ").strip().lower()
-        if human_color not in ['w', 'b']:
-            print("Invalid choice, defaulting to white.")
-            human_color = 'w'
-    
-    model = PPO.load("data/models/chess_model_59999904_steps")
-    model.policy.set_training_mode(False)  # Ensure testing mode
+    print(f"Loading model from: {model_path}")
+    try:
+        model = PPO.load(model_path)
+        model.policy.set_training_mode(False)  # Ensure testing mode
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Available models:")
+        for file in os.listdir("data/models"):
+            if file.endswith(".zip"):
+                print(f"  - data/models/{file}")
+        return
     
     done = False
     reward = 0
@@ -103,13 +136,18 @@ def main():
                 black_action = action
                 white_action = None
             print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
-            sleep(0.5)
+            sleep(args.delay if len(sys.argv) > 1 else 0.5)
         
         obs, reward, done, truncated, info = env.step(action)
     
     print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
     print("\nGame over!")
-    print(f"info white_won{info['white_won']} black_won{info['black_won']}")
+    if info.get('white_won', False):
+        print("White won!")
+    elif info.get('black_won', False):
+        print("Black won!")
+    else:
+        print("Draw!")
     sleep(2)
 
 if __name__ == "__main__":

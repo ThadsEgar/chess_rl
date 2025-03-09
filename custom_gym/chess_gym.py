@@ -158,13 +158,10 @@ class ChessEnv(gym.Env):
         self.state = self.game.new_initial_state()
         self.action_space = spaces.Discrete(self.game.num_distinct_actions())
         
-        # For CNN encoding - now ONLY the board state (no action mask)
         self.piece_channels = 13  # 12 piece channels + player channel
         self.board_size = 8  # 8x8 board
         self.num_actions = 4672
         
-        # Define observation space for CNN encoding only (no action mask)
-        # This is just the flattened 13x8x8 board encoding (832 elements)
         obs_size = self.piece_channels * self.board_size * self.board_size
         
         self.observation_space = spaces.Box(
