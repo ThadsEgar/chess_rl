@@ -6,11 +6,9 @@ from stable_baselines3 import PPO
 from custom_gym.chess_gym import ChessEnv
 
 def clear_screen():
-    """Clear the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def human_move(env):
-    """Prompt human for a move in UCI format."""
     while True:
         move_str = input("Enter your move (UCI format, e.g., e2e4): ").strip()
         try:
@@ -29,7 +27,6 @@ def human_move(env):
             print(f"Error: {e}. Please enter a valid move.")
 
 def print_board_and_info(env, reward, info, player_mode, human_color=None, white_action=None, black_action=None):
-    """Print the board and info in place using ANSI codes."""
     #sys.stdout.write('\033[H')
     #sys.stdout.flush()
     

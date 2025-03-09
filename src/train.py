@@ -1,4 +1,4 @@
-from custom_gym.chess_gym import ChessEnv
+from custom_gym.chess_gym import ActionMaskWrapper, ChessEnv
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.utils import set_random_seed
@@ -6,16 +6,15 @@ import torch
 import numpy as np
 import os
 from collections import defaultdict, deque
+from src.cnn import create_cnn_mcts_ppo
 from src.mcts import create_mcts_ppo
 import multiprocessing
 import re
 
 def make_env(rank, seed=0):
-    """
-    Utility function for multiprocessed env.
-    """
     def _init():
         env = ChessEnv()
+        env = ActionMaskWrapper(env)
         env.reset(seed=seed + rank)
         return env
     return _init
@@ -28,15 +27,6 @@ def get_latest_checkpoints(folder_path, num_checkpoints=2, pattern=r'.*\.zip'):
 
 class OpponentPoolCallback(BaseCallback):
     def __init__(self, model, checkpoint_folder, update_interval, verbose=0):
-        """
-        Callback to update the opponent pool with the latest saved models.
-        
-        Args:
-            model: The RL model instance (e.g., MCTSPPO or PPO).
-            checkpoint_folder (str): Folder where the save callback stores models.
-            update_interval (int): Timesteps between folder checks (e.g., 100000).
-            verbose (int): Verbosity level (0 = silent, 1 = print updates).
-        """
         super().__init__(verbose)
         self.model = model
         self.checkpoint_folder = checkpoint_folder
@@ -62,8 +52,6 @@ class OpponentPoolCallback(BaseCallback):
                 # Update the model's opponent pool
                 self.model.opponent_policies = opponent_policies
                 self.current_opponent_paths = latest_paths
-                if self.verbose > 0:
-                    print(f"Updated opponent pool with {len(opponent_policies)} policies at timestep {self.num_timesteps}")
         return True  # Continue training
 
 from collections import defaultdict, deque
@@ -133,7 +121,7 @@ def main():
     os.makedirs(TENSORBOARD_LOG, exist_ok=True)
     os.makedirs("data/models", exist_ok=True)
 
-    NUM_ENVS = 48  # Match to your number of CPU cores
+    NUM_ENVS = 2  # Match to your number of CPU cores
     
     envs = [make_env(i) for i in range(NUM_ENVS)]
     
@@ -143,15 +131,13 @@ def main():
     env = VecMonitor(env)
     save_freq = 10_000_000 // NUM_ENVS
 
-    # Create the MCTS-PPO model
-    model = create_mcts_ppo(
+    model = create_cnn_mcts_ppo(
         env=env,
         tensorboard_log=TENSORBOARD_LOG,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint='data/models/chess_model_checkpoint_4,6MG'
+        checkpoint=None
     )
 
-    # Create callbacks
     checkpoint_callback = CheckpointCallback(
         save_freq=save_freq,
         save_path="data/models",

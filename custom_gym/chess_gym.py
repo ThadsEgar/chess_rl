@@ -7,6 +7,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.vec_env import SubprocVecEnv
+import torch
 
 piece_mapping = {
     'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
@@ -74,6 +75,47 @@ def canonical_encode_board(state):
         board = -board
     return board
 
+def canonical_encode_board_for_cnn(state):
+    """
+    Encode a chess state into a 13-channel format for CNN:
+    - 12 channels for piece types (6 per player)
+    - 1 channel for current player (1s for white, 0s for black)
+    
+    Args:
+        state: A pyspiel chess state object
+        
+    Returns:
+        numpy.ndarray: A 13x8x8 array representing the board state
+    """
+    # Get the canonical board representation
+    board = canonical_encode_board(state)
+    
+    # Initialize 13-channel board representation
+    # 0-5: current player's pieces (P,N,B,R,Q,K)
+    # 6-11: opponent's pieces (p,n,b,r,q,k)
+    # 12: current player channel (1s for white, 0s for black)
+    board_array = np.zeros((13, 8, 8), dtype=np.float32)
+    
+    # Fill piece channels
+    for row in range(8):
+        for col in range(8):
+            piece_value = board[row, col]
+            if piece_value > 0:  # Current player pieces (positive values)
+                channel = piece_value - 1  # Map 1-6 to channels 0-5
+                board_array[channel, row, col] = 1.0
+            elif piece_value < 0:  # Opponent pieces (negative values)
+                channel = abs(piece_value) + 5  # Map -1 to -6 to channels 6-11
+                board_array[channel, row, col] = 1.0
+    
+    # Add current player channel (1s for white, 0s for black)
+    current_player = state.current_player()
+    if current_player == 1:  # White's turn (assuming white is player 1)
+        board_array[12, :, :] = 1.0
+    else:  # Black's turn
+        board_array[12, :, :] = 0.0
+    
+    return board_array
+
 def get_game_result(state):
     result = {
         'terminal': state.is_terminal(),
@@ -115,16 +157,23 @@ class ChessEnv(gym.Env):
         self.game = pyspiel.load_game("chess")
         self.state = self.game.new_initial_state()
         self.action_space = spaces.Discrete(self.game.num_distinct_actions())
-        board_size = 64
-        num_actions = 4672
-        obs_size = board_size + num_actions
+        
+        # For CNN encoding - now ONLY the board state (no action mask)
+        self.piece_channels = 13  # 12 piece channels + player channel
+        self.board_size = 8  # 8x8 board
+        self.num_actions = 4672
+        
+        # Define observation space for CNN encoding only (no action mask)
+        # This is just the flattened 13x8x8 board encoding (832 elements)
+        obs_size = self.piece_channels * self.board_size * self.board_size
         
         self.observation_space = spaces.Box(
-            low=-6,
-            high=6,
+            low=-10,
+            high=10,
             shape=(obs_size,),
             dtype=np.float32
         )
+        
         self.max_moves = 150
         self.move_count = 0
         self.last_move = None
@@ -174,6 +223,7 @@ class ChessEnv(gym.Env):
             'is_checkmate': result['checkmate'],
             'is_stalemate': result['stalemate'],
             'position_repetition_count': self.position_history.count(str(self.state)),
+            'action_mask': self._get_action_mask()
         }
         
         # Set outcome based on game result: white win -> outcome=1, black win -> outcome=-1, draw -> outcome=0.
@@ -194,14 +244,59 @@ class ChessEnv(gym.Env):
         return self._get_obs(), reward, done, truncated, info
 
     def _get_obs(self):
-        board_obs = canonical_encode_board(self.state).flatten()
+        board_array = canonical_encode_board_for_cnn(self.state)
+        
+        return board_array.flatten()
+    
+    def _get_action_mask(self):
         legal_actions = self.state.legal_actions()
-        mask = np.zeros(self.game.num_distinct_actions(), dtype=np.float32)
+        mask = np.zeros(4672, dtype=np.float32)
         mask[legal_actions] = 1.0
-        return np.concatenate([board_obs, mask])
+        return mask
+    
+    def get_legal_actions(self):
+        return self.state.legal_actions()
     
     def render(self, mode="human"):
         print(render_board(self.state))
     
     def close(self):
         pass
+    
+    def get_current_player(self):
+        """Get the current player (0 for black, 1 for white)"""
+        return self.state.current_player()
+
+    def get_state(self):
+        """Get the current game state"""
+        return self.state
+        
+# Special wrapper to handle action masking with stable-baselines3
+class ActionMaskWrapper(gym.Wrapper):
+    """
+    Wrapper that exposes the action mask as part of the observation for easy use with
+    standard RL algorithms that don't natively support action masking.
+    """
+    def __init__(self, env):
+        super(ActionMaskWrapper, self).__init__(env)
+        board_size = self.env.piece_channels * self.env.board_size * self.env.board_size
+        mask_size = self.env.action_space.n
+        
+        self.observation_space = spaces.Dict({
+            'board': self.env.observation_space,
+            'action_mask': spaces.Box(
+                low=0, high=1, 
+                shape=(mask_size,), 
+                dtype=np.float32
+            )
+        })
+    
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        action_mask = self.env._get_action_mask()
+        return {'board': obs, 'action_mask': action_mask}, info
+    
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        action_mask = self.env._get_action_mask()
+        return {'board': obs, 'action_mask': action_mask}, reward, terminated, truncated, info

@@ -1,15 +1,12 @@
-import os
 import numpy as np
 import torch
 import math
 from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
-from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.utils import explained_variance
-import pyspiel
 
-from custom_gym.chess_gym import ChessEnv, canonical_encode_board
+from custom_gym.chess_gym import canonical_encode_board
 
 piece_mapping = {
     'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
