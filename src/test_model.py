@@ -4,7 +4,8 @@ import sys
 import numpy as np
 import argparse
 from stable_baselines3 import PPO
-from custom_gym.chess_gym import ChessEnv
+from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
+import chess
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -28,9 +29,6 @@ def human_move(env):
             print(f"Error: {e}. Please enter a valid move.")
 
 def print_board_and_info(env, reward, info, player_mode, human_color=None, white_action=None, black_action=None):
-    #sys.stdout.write('\033[H')
-    #sys.stdout.flush()
-    
     env.render()
     
     current_player = 'White' if env.state.current_player() == 0 else 'Black'
@@ -41,20 +39,22 @@ def print_board_and_info(env, reward, info, player_mode, human_color=None, white
     
     print(turn_info)
     if player_mode == 'ai_vs_ai':
-        if white_action is not None and current_player == 'white':
+        if white_action is not None and current_player == 'White':
             print(f"White (AI) plays: {white_action}")
-        elif black_action is not None and current_player == 'black':
+        elif black_action is not None and current_player == 'Black':
             print(f"Black (AI) plays: {black_action}")
         else:
             print()  # Empty line if no move yet
-    elif player_mode == 'human_vs_ai' and white_action is not None and current_player[0].lower() != human_color:
-        print(f"Model plays: {white_action}")
+    elif player_mode == 'human_vs_ai' and current_player[0].lower() != human_color:
+        action_to_show = white_action if current_player == 'White' else black_action
+        if action_to_show is not None:
+            print(f"Model plays: {action_to_show}")
+        else:
+            print()  # Empty line if no move yet
     else:
         print()  # Empty line for alignment
     
     print(f"Reward: {reward}, Move Count: {info.get('move_count', 'N/A')}")
-    #sys.stdout.write('\n')
-    #sys.stdout.flush()
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Test a trained chess model')
@@ -72,7 +72,8 @@ def main():
     # Parse command line arguments
     args = parse_arguments()
     
-    env = ChessEnv()
+    # Create environment with action mask wrapper
+    env = ActionMaskWrapper(ChessEnv())
     obs, info = env.reset()
     
     # If no command line arguments, ask interactively
@@ -120,23 +121,39 @@ def main():
         current_player_str = 'w' if current_player == 0 else 'b'
         
         if player_mode == 'human_vs_ai' and current_player_str == human_color:
-            action = human_move(env)
+            action = human_move(env.env)  # Use unwrapped env for human moves
             if current_player == 0:
                 white_action = action
             else:
                 black_action = action
         else:
-            action, _ = model.predict(obs, state=env.state, deterministic=True)
-            if isinstance(action, np.ndarray):
-                action = int(action.item())
-            if current_player == 0:
-                white_action = action
-                black_action = None  # Reset for next turn
-            else:
-                black_action = action
-                white_action = None
-            print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
-            sleep(args.delay if len(sys.argv) > 1 else 0.5)
+            # Model prediction
+            try:
+                # The model expects a dictionary observation with 'board' and 'action_mask'
+                action, _ = model.predict(obs, deterministic=True)
+                
+                if isinstance(action, np.ndarray):
+                    action = int(action.item())
+                
+                if current_player == 0:
+                    white_action = action
+                    black_action = None  # Reset for next turn
+                else:
+                    black_action = action
+                    white_action = None
+                
+                print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
+                sleep(args.delay if len(sys.argv) > 1 else 0.5)
+            except Exception as e:
+                print(f"Error during model prediction: {e}")
+                # Fallback to random legal move
+                legal_actions = env.env.state.legal_actions()
+                action = np.random.choice(legal_actions)
+                print(f"Falling back to random move: {action}")
+                if current_player == 0:
+                    white_action = action
+                else:
+                    black_action = action
         
         obs, reward, done, truncated, info = env.step(action)
     
