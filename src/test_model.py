@@ -29,9 +29,12 @@ def human_move(env):
             print(f"Error: {e}. Please enter a valid move.")
 
 def print_board_and_info(env, reward, info, player_mode, human_color=None, white_action=None, black_action=None):
-    env.render()
+    # Access the unwrapped environment for rendering and state information
+    unwrapped_env = env.env if hasattr(env, 'env') else env
     
-    current_player = 'White' if env.state.current_player() == 0 else 'Black'
+    unwrapped_env.render()
+    
+    current_player = 'White' if unwrapped_env.state.current_player() == 0 else 'Black'
     if player_mode == 'human_vs_ai':
         turn_info = f"Turn: {current_player} ({'Human' if current_player[0].lower() == human_color else 'Model'})"
     else:  # ai_vs_ai
@@ -73,7 +76,8 @@ def main():
     args = parse_arguments()
     
     # Create environment with action mask wrapper
-    env = ActionMaskWrapper(ChessEnv())
+    base_env = ChessEnv()
+    env = ActionMaskWrapper(base_env)
     obs, info = env.reset()
     
     # If no command line arguments, ask interactively
@@ -117,11 +121,12 @@ def main():
     while not done:
         print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
         
-        current_player = env.state.current_player()
+        # Get current player from the unwrapped environment
+        current_player = base_env.state.current_player()
         current_player_str = 'w' if current_player == 0 else 'b'
         
         if player_mode == 'human_vs_ai' and current_player_str == human_color:
-            action = human_move(env.env)  # Use unwrapped env for human moves
+            action = human_move(base_env)  # Use unwrapped env for human moves
             if current_player == 0:
                 white_action = action
             else:
@@ -147,7 +152,7 @@ def main():
             except Exception as e:
                 print(f"Error during model prediction: {e}")
                 # Fallback to random legal move
-                legal_actions = env.env.state.legal_actions()
+                legal_actions = base_env.state.legal_actions()
                 action = np.random.choice(legal_actions)
                 print(f"Falling back to random move: {action}")
                 if current_player == 0:
