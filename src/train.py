@@ -20,9 +20,9 @@ def make_env(rank, seed=0):
         return env
     return _init
 
-def get_latest_checkpoints(folder_path, num_checkpoints=2, pattern=r'.*\.zip'):
+def get_latest_checkpoints(folder_path, num_checkpoints=10, pattern=r'.*\.zip'):
     files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and re.match(pattern, f)]
-    files.sort()  # Sort alphabetically; assumes this reflects save order
+    files.sort()  # Sort alphabetically
     latest_files = files[-num_checkpoints:]
     return [os.path.join(folder_path, f) for f in latest_files]
 
@@ -219,7 +219,7 @@ def main():
         checkpoint_folder="data/models",
         update_interval=1000000,
         verbose=1,
-        opponent_pool_prob=0.8  # Increased from default 0.5
+        opponent_pool_prob=0.8
     )
     
     # Train the model
