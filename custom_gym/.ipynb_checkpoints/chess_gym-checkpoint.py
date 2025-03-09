@@ -188,9 +188,6 @@ class ChessEnv(gym.Env):
             opponent = 1 - current_player
             info['opponent_reward'] = float(self.state.rewards()[opponent])
 
-        if current_player == 0:
-            reward += 0.005  # Small constant bonus for black
-    
         return self._get_obs(), reward, done, truncated, info
 
     def _get_obs(self):
