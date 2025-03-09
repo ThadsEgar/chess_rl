@@ -41,18 +41,44 @@ class OpponentPoolCallback(BaseCallback):
             if latest_paths != self.current_opponent_paths:
                 opponent_policies = []
                 for path in latest_paths:
-                    # Load the policy from the checkpoint
-                    opponent_model = self.model.__class__.load(
-                        path,
-                        env=self.model.env,
-                        device=self.model.device
-                    )
-                    opponent_policy = opponent_model.policy
-                    opponent_policy.set_training_mode(False)  # Disable training mode
-                    opponent_policies.append(opponent_policy)
-                # Update the model's opponent pool
-                self.model.opponent_policies = opponent_policies
-                self.current_opponent_paths = latest_paths
+                    try:
+                        # Load the policy from the checkpoint
+                        opponent_model = self.model.__class__.load(
+                            path,
+                            env=self.model.env,
+                            device=self.model.device
+                        )
+                        
+                        # Make sure the policy is initialized
+                        if not hasattr(opponent_model, 'policy') or opponent_model.policy is None:
+                            if self.verbose > 0:
+                                print(f"Warning: Model loaded from {path} has no policy attribute. Skipping.")
+                            continue
+                            
+                        opponent_policy = opponent_model.policy
+                        opponent_policy.set_training_mode(False)  # Disable training mode
+                        opponent_policies.append(opponent_policy)
+                        
+                        if self.verbose > 0:
+                            print(f"Added opponent policy from {path}")
+                    except Exception as e:
+                        if self.verbose > 0:
+                            print(f"Error loading model from {path}: {e}")
+                        continue
+                
+                # Only update if we successfully loaded at least one policy
+                if opponent_policies:
+                    self.model.opponent_policies = opponent_policies
+                    self.current_opponent_paths = latest_paths
+                    if self.verbose > 0:
+                        print(f"Updated opponent pool with {len(opponent_policies)} policies")
+                elif not self.model.opponent_policies:
+                    # If no policies were loaded and the model doesn't have any yet,
+                    # use the current policy as a fallback
+                    self.model.opponent_policies = [self.model.policy]
+                    if self.verbose > 0:
+                        print("Using current policy as opponent")
+        
         return True  # Continue training
 
 from collections import defaultdict, deque

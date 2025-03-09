@@ -382,8 +382,17 @@ class MCTSPPO(PPO):
             extra = np.random.choice([0, 1])
             self.agent_record_player = np.array([0] * half + [1] * half + [extra])
         
+        # Initialize opponent policies list
         self.opponent_policies = []
-        self.current_opponent_policies = [self.policy] * self.n_envs
+        
+        # Initialize current opponent policies only if policy is available
+        # This handles the case when loading from a checkpoint
+        if hasattr(self, 'policy') and self.policy is not None:
+            self.current_opponent_policies = [self.policy] * self.n_envs
+        else:
+            # Will be initialized later when policy becomes available
+            self.current_opponent_policies = None
+            
         self.opponent_pool_prob = kwargs.get('opponent_pool_prob', 0.5)
     
     def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
@@ -400,8 +409,13 @@ class MCTSPPO(PPO):
             except Exception as e:
                 print(f"Warning: Could not get current player: {e}")
                 
+        # Initialize policy if not already done
         if self.policy.mcts is None:
             self.policy.mcts = MCTS(self.policy, num_simulations=50, c_puct=2.0)
+            
+        # Initialize current_opponent_policies if it's None
+        if self.current_opponent_policies is None:
+            self.current_opponent_policies = [self.policy] * self.n_envs
             
         use_mcts_in_training = False
 
