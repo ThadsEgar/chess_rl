@@ -51,8 +51,13 @@ class CNNMCTSActorCriticPolicy(ActorCriticPolicy):
     def _build_cnn_extractor(self):
         cnn = nn.Sequential(
             nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten()
@@ -65,20 +70,20 @@ class CNNMCTSActorCriticPolicy(ActorCriticPolicy):
 
     def _build_policy_net(self, features_dim):
         return nn.Sequential(
-            nn.Linear(features_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, self.action_space.n)
+            nn.Linear(features_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, self.action_space.n)
         )
 
     def _build_value_net(self, features_dim):
         return nn.Sequential(
-            nn.Linear(features_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1)
+            nn.Linear(features_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
         )
         
     def extract_features(self, obs, features_extractor=None):
@@ -219,43 +224,126 @@ class MCTS:
         self.policy_net = policy_net
         self.num_simulations = num_simulations
         self.c_puct = c_puct
+        self.device = policy_net.device
         
     def search(self, state):
         root = Node(state)
         
-        for _ in range(self.num_simulations):
-            node = root
-            search_path = [node]
-            
-            # Selection phase
-            while node.children and not node.is_terminal:
-                action, node = node.select_child(self.c_puct)
-                search_path.append(node)
-            
-            # Expansion and evaluation
-            if not node.is_terminal:
-                value = node.expand(self.policy_net)
-                if node.state.current_player() != root.root_player:
-                    value = -value
-            else:
-                value = node.state.rewards()[root.root_player]
-            
-            # Backpropagation
-            for node in reversed(search_path):
-                node.backpropagate(value)
+        # Batch size for parallel evaluations
+        batch_size = 8  # Can be increased based on GPU memory
         
-        # Choose move based on visit counts
-        visits = {action: child.visit_count for action, child in root.children.items()}
-        if not visits:
-            legal_actions = state.legal_actions()
+        for sim_batch in range(0, self.num_simulations, batch_size):
+            # Actual batch size for this iteration
+            current_batch_size = min(batch_size, self.num_simulations - sim_batch)
+            
+            # Selection and expansion phases - prepare batch
+            leaf_nodes = []
+            for _ in range(current_batch_size):
+                node = root
+                search_path = [node]
+                
+                # Selection phase - find leaf node
+                while not node.is_terminal and node.children:
+                    action, node = node.select_child(self.c_puct)
+                    search_path.append(node)
+                
+                # If leaf node is not terminal and not expanded, add to batch
+                if not node.is_terminal and not node.children:
+                    leaf_nodes.append((node, search_path))
+            
+            # Skip if no leaf nodes to evaluate
+            if not leaf_nodes:
+                continue
+                
+            # Prepare batch for network evaluation
+            batch_obs = []
+            for node, _ in leaf_nodes:
+                from custom_gym.chess_gym import canonical_encode_board_for_cnn
+                board_obs = canonical_encode_board_for_cnn(node.state)
+                board_obs_flat = board_obs.flatten()
+                legal_actions = node.state.legal_actions()
+                mask = np.zeros(node.state.num_actions(), dtype=np.float32)
+                mask[legal_actions] = 1.0
+                obs = np.concatenate([board_obs_flat, mask])
+                batch_obs.append(obs)
+            
+            # Convert to tensor and evaluate batch
+            with torch.no_grad():
+                batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
+                batch_values = []
+                batch_probs = []
+                
+                # Process in smaller chunks if needed
+                for i in range(0, len(batch_obs), 4):  # Process 4 at a time to avoid memory issues
+                    chunk = batch_tensor[i:i+4]
+                    actions, values, _ = self.policy_net(chunk, deterministic=False)
+                    
+                    # Extract action probabilities
+                    features = self.policy_net.extract_features(chunk)
+                    latent_pi, _ = self.policy_net.mlp_extractor(features)
+                    logits = self.policy_net.action_net(latent_pi)
+                    
+                    # Apply action masking
+                    board_flat_size = self.policy_net.board_flat_size
+                    action_masks = chunk[:, board_flat_size:]
+                    illegal_masks = (action_masks < 0.5)
+                    logits = logits.masked_fill(illegal_masks, -1e8)
+                    probs = F.softmax(logits, dim=-1)
+                    
+                    batch_values.extend(values.cpu().numpy())
+                    batch_probs.append(probs.cpu())
+                
+                if batch_probs:
+                    batch_probs = torch.cat(batch_probs, dim=0)
+            
+            # Expansion and backpropagation for each leaf node
+            for i, (node, search_path) in enumerate(leaf_nodes):
+                if i >= len(batch_values):  # Safety check
+                    continue
+                    
+                value = batch_values[i]
+                probs = batch_probs[i] if i < len(batch_probs) else None
+                
+                # Expand node with evaluated probabilities
+                legal_actions = node.state.legal_actions()
+                for action in legal_actions:
+                    if action not in node.children and probs is not None:
+                        next_state = node.state.clone()
+                        next_state.apply_action(action)
+                        node.children[action] = Node(
+                            state=next_state,
+                            prior=probs[action].item(),
+                            parent=node,
+                            root_player=node.root_player
+                        )
+                
+                # Backpropagate value
+                for path_node in reversed(search_path):
+                    path_node.visit_count += 1
+                    path_node.total_value += value
+                    path_node.mean_value = path_node.total_value / path_node.visit_count
+                    
+                    # Flip value for opponent's perspective
+                    value = -value
+        
+        # Select best action from root
+        if not root.children:
+            # If no children, return a random legal action
+            legal_actions = root.state.legal_actions()
             if legal_actions:
                 return np.random.choice(legal_actions)
-            return 0
+            return 0  # Fallback
             
-        top_k = sorted(visits.items(), key=lambda x: x[1], reverse=True)[:5]
-        actions, counts = zip(*top_k)
-        probs = np.array(counts) / sum(counts)
-        return np.random.choice(actions, p=probs)
+        # Use visit count to determine best action (most robust)
+        best_action = None
+        most_visits = -1
+        
+        for action, child in root.children.items():
+            if child.visit_count > most_visits:
+                most_visits = child.visit_count
+                best_action = action
+                
+        return best_action
 
 
 class MCTSPPO(PPO):
@@ -303,11 +391,11 @@ class MCTSPPO(PPO):
             agent_turn_indices = [e for e in range(self.n_envs) if current_players[e] == self.agent_record_player[e]]
             opponent_turn_indices = [e for e in range(self.n_envs) if current_players[e] != self.agent_record_player[e]]
 
-            # Agent's turns
+            # Agent's turns - process in a single batch for better GPU utilization
             if agent_turn_indices:
                 # Extract board and action mask for agent's turns from batched arrays
-                agent_boards = self._last_obs['board'][agent_turn_indices]  # Shape: (num_agent_turns, 832)
-                agent_masks = self._last_obs['action_mask'][agent_turn_indices]  # Shape: (num_agent_turns, 4672)
+                agent_boards = self._last_obs['board'][agent_turn_indices]
+                agent_masks = self._last_obs['action_mask'][agent_turn_indices]
                 
                 # Convert to tensors
                 board_tensor = torch.as_tensor(agent_boards).to(self.device)
@@ -323,25 +411,30 @@ class MCTSPPO(PPO):
                     batch_values[e] = agent_values[i]
                     batch_log_probs[e] = agent_log_probs[i]
 
-            # Opponent's turns
-            for e in opponent_turn_indices:
-                opponent_policy = self.current_opponent_policies[e]
-                # Extract observation for this specific environment
-                obs_e = {
-                    'board': self._last_obs['board'][e:e+1],  # Shape: (1, 832)
-                    'action_mask': self._last_obs['action_mask'][e:e+1]  # Shape: (1, 4672)
-                }
-                with torch.no_grad():
-                    obs_tensor = {
-                        'board': torch.as_tensor(obs_e['board']).to(self.device),
-                        'action_mask': torch.as_tensor(obs_e['action_mask']).to(self.device)
-                    }
-                    action, _, _ = opponent_policy(obs_tensor, deterministic=False)
-                    if isinstance(action, torch.Tensor):
-                        action = action.cpu().numpy()
-                actions[e] = action.item() if hasattr(action, 'item') else action
+            # Opponent's turns - batch process when possible
+            if opponent_turn_indices:
+                policy_groups = {}
+                for e in opponent_turn_indices:
+                    policy = self.current_opponent_policies[e]
+                    if policy not in policy_groups:
+                        policy_groups[policy] = []
+                    policy_groups[policy].append(e)
+                
+                for policy, indices in policy_groups.items():
+                    opp_boards = self._last_obs['board'][indices]
+                    opp_masks = self._last_obs['action_mask'][indices]
+                    
+                    board_tensor = torch.as_tensor(opp_boards).to(self.device)
+                    mask_tensor = torch.as_tensor(opp_masks).to(self.device)
+                    obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
+                    
+                    with torch.no_grad():
+                        opp_actions, _, _ = policy(obs_dict, deterministic=False)
+                        opp_actions = opp_actions.cpu().numpy()
+                    
+                    for i, e in enumerate(indices):
+                        actions[e] = opp_actions[i]
 
-            # Step environment
             new_obs, rewards, dones, infos = env.step(actions)
             if not isinstance(infos, list):
                 infos = [infos] * self.n_envs
@@ -353,7 +446,6 @@ class MCTSPPO(PPO):
                 return False
 
             # Fill batch data
-            # Use self._last_obs directly as it's in the correct dictionary-of-arrays format
             batch_obs = self._last_obs
             batch_actions = actions
             batch_rewards = rewards
@@ -369,6 +461,7 @@ class MCTSPPO(PPO):
                 batch_log_probs
             )
 
+            # Process done episodes and update opponent policies
             for e in range(self.n_envs):
                 if dones[e]:
                     if self.last_agent_step[e] is not None:
@@ -383,9 +476,8 @@ class MCTSPPO(PPO):
                             rollout_buffer.rewards[last_pos, e] = 0
                         
                         new_obs_e, new_info = env.reset(indices=[e])
-                        # Update self._last_obs for the reset environment
                         current_players[e] = 1
-                        self._last_obs[e] = new_obs[e]  # Use the reset obs from step
+                        self._last_obs[e] = new_obs[e]
                         self.last_agent_step[e] = None
                         current_players[e] = new_info.get("current_player", 0)
                     else:
@@ -409,7 +501,6 @@ class MCTSPPO(PPO):
                 key: torch.as_tensor(value, device=self.device)
                 for key, value in self._last_obs.items()
             }
-            # Now pass the tensor dictionary to predict_values
             last_values = self.policy.predict_values(obs_tensor)
         rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
@@ -417,6 +508,15 @@ class MCTSPPO(PPO):
 
 
 def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
+    if device == 'cuda':
+        torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
+        
+    policy_kwargs = {
+        'activation_fn': nn.ReLU,
+        'net_arch': None,
+        'normalize_images': False,
+    }
+    
     if checkpoint:
         print(f'Checkpoint: {checkpoint} loaded')
         model = MCTSPPO.load(
@@ -426,31 +526,34 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             tensorboard_log=tensorboard_log, 
             verbose=1,
             learning_rate=3e-5,
-            n_steps=2048,
-            batch_size=128,
+            n_steps=8192,
+            batch_size=8192,
             n_epochs=4,
             gamma=0.99,
             device=device,
             clip_range=0.2,
             ent_coef=0.01,
             vf_coef=0.5,
+            n_minibatches=16,
+            policy_kwargs=policy_kwargs,
         )
     else:
         model = MCTSPPO(
             CNNMCTSActorCriticPolicy,
             env,
             tensorboard_log=tensorboard_log,
-            policy_kwargs=None,
+            policy_kwargs=policy_kwargs,
             verbose=1,
             learning_rate=3e-5,
-            n_steps=2048,
-            batch_size=128,
+            n_steps=8192,
+            batch_size=8192,
             n_epochs=4,
             gamma=0.99,
             device=device,
             clip_range=0.2,
             ent_coef=0.01,
             vf_coef=0.5,
+            n_minibatches=16,
         )
     
     return model

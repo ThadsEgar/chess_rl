@@ -10,6 +10,7 @@ from src.cnn import create_cnn_mcts_ppo
 from src.mcts import create_mcts_ppo
 import multiprocessing
 import re
+import sys
 
 def make_env(rank, seed=0):
     def _init():
@@ -117,51 +118,57 @@ class ChessMetricsCallback(BaseCallback):
 
 def main():
     # Set up logging directory
-    TENSORBOARD_LOG = 'data/logs/'
-    os.makedirs(TENSORBOARD_LOG, exist_ok=True)
+    os.makedirs("data/logs", exist_ok=True)
     os.makedirs("data/models", exist_ok=True)
-
-    NUM_ENVS = 2  # Match to your number of CPU cores
     
-    envs = [make_env(i) for i in range(NUM_ENVS)]
+    # Set device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using {device} device")
     
-    multiprocessing.set_start_method('spawn', force=True)
-    
-    env = SubprocVecEnv(envs)
+    # Create vectorized environment
+    n_envs = 48  # Increased from previous value
+    env = make_vec_env(make_env, n_envs=n_envs, seed=0, vec_env_cls=SubprocVecEnv)
     env = VecMonitor(env)
-    save_freq = 10_000_000 // NUM_ENVS
-
+    
+    # Create or load model
+    checkpoint = None
+    if len(sys.argv) > 1:
+        checkpoint = sys.argv[1]
+    
+    # Use CNN-based policy
     model = create_cnn_mcts_ppo(
         env=env,
-        tensorboard_log=TENSORBOARD_LOG,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-        checkpoint=None
+        tensorboard_log="data/logs",
+        device=device,
+        checkpoint=checkpoint
     )
-
+    
+    # Set up callbacks
     checkpoint_callback = CheckpointCallback(
-        save_freq=save_freq,
-        save_path="data/models",
-        name_prefix="chess_model"
+        save_freq=50000,
+        save_path="data/models/",
+        name_prefix="chess_model",
+        save_replay_buffer=False,
+        save_vecnormalize=False,
     )
-
-    metrics_callback = ChessMetricsCallback()
+    
+    # Add metrics callback
+    metrics_callback = ChessMetricsCallback(verbose=1, log_freq=10000)
+    
+    # Add opponent pool callback
     opponent_callback = OpponentPoolCallback(
         model=model,
         checkpoint_folder="data/models",
-        update_interval=10_000_000,
+        update_interval=1000000,
         verbose=1
     )
-
-    # Train the model with both callbacks
-    total_timesteps = 1_000_000_000
-    try:
-        model.learn(
-            total_timesteps=total_timesteps,
-            callback=[checkpoint_callback, metrics_callback, opponent_callback]
-        )
-    finally:
-        # Make sure to close the environments!
-        env.close()
+    
+    # Train the model
+    model.learn(
+        total_timesteps=int(1e8),
+        callback=[checkpoint_callback, metrics_callback, opponent_callback],
+        progress_bar=True
+    )
 
     model.save("data/models/chess_model_complete")
 
