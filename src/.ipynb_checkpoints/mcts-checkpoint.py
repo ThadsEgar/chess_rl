@@ -184,7 +184,7 @@ class MCTSMaskableActorCriticPolicy(ActorCriticPolicy):
 
     def predict(self, observation, state=None, episode_start=None, deterministic=False):
         if self.mcts is None:
-            self.mcts = MCTS(self, num_simulations=400, c_puct=2)
+            self.mcts = MCTS(self, num_simulations=1200, c_puct=2)
         if deterministic:  # Always use MCTS for deterministic in testing
             self.training = False  # Force testing mode
             action = self.mcts.search(state)
