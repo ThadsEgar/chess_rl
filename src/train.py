@@ -27,19 +27,38 @@ def get_latest_checkpoints(folder_path, num_checkpoints=2, pattern=r'.*\.zip'):
     return [os.path.join(folder_path, f) for f in latest_files]
 
 class OpponentPoolCallback(BaseCallback):
-    def __init__(self, model, checkpoint_folder, update_interval, verbose=0):
+    def __init__(self, model, checkpoint_folder, update_interval, verbose=0, opponent_pool_prob=0.8):
         super().__init__(verbose)
         self.model = model
         self.checkpoint_folder = checkpoint_folder
         self.update_interval = update_interval
         self.current_opponent_paths = []  # Tracks the current set of model paths
         self.init_load = False
+        self.opponent_pool_prob = opponent_pool_prob  # Probability of using opponent pool
+        self.random_policy = None  # Will store reference to random policy if found
 
     def _on_step(self):
+        # Preserve random policy if it exists
+        if self.random_policy is None and hasattr(self.model, 'opponent_policies') and self.model.opponent_policies:
+            # Check if any policy is a RandomPolicy
+            for policy in self.model.opponent_policies:
+                if policy.__class__.__name__ == 'RandomPolicy':
+                    self.random_policy = policy
+                    if self.verbose > 0:
+                        print("Found and preserved random policy")
+                    break
+        
         if self.num_timesteps % self.update_interval == 0 or self.init_load is False:
             latest_paths = get_latest_checkpoints(self.checkpoint_folder)
             if latest_paths != self.current_opponent_paths:
                 opponent_policies = []
+                
+                # Add random policy if we have one
+                if self.random_policy is not None:
+                    opponent_policies.append(self.random_policy)
+                    if self.verbose > 0:
+                        print("Added preserved random policy to opponent pool")
+                
                 for path in latest_paths:
                     try:
                         # Load the policy from the checkpoint
@@ -70,8 +89,13 @@ class OpponentPoolCallback(BaseCallback):
                 if opponent_policies:
                     self.model.opponent_policies = opponent_policies
                     self.current_opponent_paths = latest_paths
+                    
+                    # Update opponent pool probability
+                    self.model.opponent_pool_prob = self.opponent_pool_prob
+                    
                     if self.verbose > 0:
                         print(f"Updated opponent pool with {len(opponent_policies)} policies")
+                        print(f"Set opponent pool probability to {self.opponent_pool_prob}")
                 elif not self.model.opponent_policies:
                     # If no policies were loaded and the model doesn't have any yet,
                     # use the current policy as a fallback
@@ -189,12 +213,13 @@ def main():
     # Add metrics callback
     metrics_callback = ChessMetricsCallback(verbose=1, log_freq=10000)
     
-    # Add opponent pool callback
+    # Add opponent pool callback with higher probability of using opponent pool
     opponent_callback = OpponentPoolCallback(
         model=model,
         checkpoint_folder="data/models",
         update_interval=1000000,
-        verbose=1
+        verbose=1,
+        opponent_pool_prob=0.8  # Increased from default 0.5
     )
     
     # Train the model

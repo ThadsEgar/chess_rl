@@ -382,8 +382,51 @@ class MCTSPPO(PPO):
             extra = np.random.choice([0, 1])
             self.agent_record_player = np.array([0] * half + [1] * half + [extra])
         
-        # Initialize opponent policies list
+        # Initialize opponent policies list with a random policy
         self.opponent_policies = []
+        
+        # Add a random policy to the opponent pool
+        try:
+            # Create a random policy that selects random legal moves
+            class RandomPolicy:
+                def __init__(self, device='cpu'):
+                    self.device = device
+                
+                def __call__(self, obs, deterministic=False):
+                    # Extract action mask from observation
+                    if isinstance(obs, dict) and 'action_mask' in obs:
+                        action_mask = obs['action_mask']
+                    else:
+                        # Fallback for non-dictionary observations
+                        board_size = 832  # 13*8*8
+                        action_mask = obs[:, board_size:]
+                    
+                    # Find legal actions (where mask is 1)
+                    batch_size = action_mask.shape[0]
+                    actions = torch.zeros(batch_size, dtype=torch.int64, device=self.device)
+                    values = torch.zeros(batch_size, device=self.device)
+                    log_probs = torch.zeros(batch_size, device=self.device)
+                    
+                    # For each observation in the batch
+                    for i in range(batch_size):
+                        legal_actions = torch.where(action_mask[i] > 0.5)[0]
+                        if len(legal_actions) > 0:
+                            # Choose a random legal action
+                            random_idx = torch.randint(0, len(legal_actions), (1,), device=self.device)
+                            actions[i] = legal_actions[random_idx]
+                    
+                    return actions, values, log_probs
+                
+                def set_training_mode(self, mode):
+                    # Random policy doesn't need training mode
+                    pass
+            
+            # Create and add the random policy
+            random_policy = RandomPolicy(device=self.device)
+            self.opponent_policies.append(random_policy)
+            print("Added random policy to opponent pool")
+        except Exception as e:
+            print(f"Error creating random policy: {e}")
         
         # Initialize current opponent policies only if policy is available
         # This handles the case when loading from a checkpoint
