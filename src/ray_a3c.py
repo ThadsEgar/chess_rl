@@ -6,13 +6,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import ray
-from ray.util.sgd import TorchTrainer
-from ray.util.sgd.utils import AverageMeterCollection
 import gym
 from collections import deque
 
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 from src.cnn import CNNMCTSActorCriticPolicy, MCTS, Node
+
+# Simple meter collection replacement
+class AverageMeterCollection:
+    def __init__(self):
+        self.meters = {}
+        
+    def update(self, metrics):
+        for k, v in metrics.items():
+            if k not in self.meters:
+                self.meters[k] = []
+            self.meters[k].append(v)
+            
+    def summary(self):
+        return {k: np.mean(v[-100:]) if v else 0 for k, v in self.meters.items()}
 
 # Make environment creation function
 def make_env(seed=0, simple_test=False, white_advantage=None):
