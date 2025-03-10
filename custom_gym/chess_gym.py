@@ -274,11 +274,12 @@ class ChessEnv(gym.Env):
         Returns:
             observation: The new state
             reward: Reward for this step
-            done: Whether the game is done
+            terminated: Whether the game is done due to termination
+            truncated: Whether the game is done due to truncation
             info: Additional information
         """
         if self.done:
-            return self._get_obs(), 0, True, {"message": "Game already over"}
+            return self._get_obs(), 0, True, False, {"message": "Game already over"}
         
         # Convert action index to move
         try:
@@ -287,7 +288,7 @@ class ChessEnv(gym.Env):
             # Check if the move is legal
             if move not in self.board.legal_moves:
                 # Illegal move, return negative reward and don't change state
-                return self._get_obs(), -0.1, False, {"message": "Illegal move"}
+                return self._get_obs(), -0.1, False, False, {"message": "Illegal move"}
             
             # Make the move
             self.board.push(move)
@@ -329,13 +330,13 @@ class ChessEnv(gym.Env):
             info["move_count"] = self.move_count
             info["current_player"] = 1 if self.board.turn else 0
             
-            # Follow new Gymnasium API: observation, reward, terminated, info
-            return self._get_obs(), reward, self.done, info
+            # Follow new Gymnasium API: (observation, reward, terminated, truncated, info)
+            return self._get_obs(), reward, self.done, False, info
             
         except Exception as e:
             # If there's an error, return the current state and a negative reward
             print(f"Error making move: {e}")
-            return self._get_obs(), -0.1, False, {"message": f"Error: {e}"}
+            return self._get_obs(), -0.1, False, False, {"message": f"Error: {e}"}
     
     def _get_obs(self):
         """Get the current observation."""
@@ -412,15 +413,16 @@ class ActionMaskWrapper(gym.Wrapper):
         step_result = self.env.step(action)
         
         if isinstance(step_result, tuple):
-            if len(step_result) == 4:  # obs, reward, done, info
+            if len(step_result) == 4:  # obs, reward, done, info (old Gym API)
                 obs, reward, done, info = step_result
-                return obs, reward, done, info
+                # Convert to new Gymnasium API: obs, reward, terminated, truncated, info
+                return obs, reward, done, False, info
             elif len(step_result) == 5:  # obs, reward, terminated, truncated, info (newest Gymnasium API)
-                obs, reward, terminated, truncated, info = step_result
-                return obs, reward, terminated, truncated, info
+                return step_result  # Already in the right format
         
-        # Default fallback - just return whatever the environment returned
-        return step_result
+        # Unexpected format - return a safe default with the correct Gymnasium format
+        print(f"WARNING: Unexpected step result format: {type(step_result)}")
+        return {}, 0.0, True, False, {}
 
 def make_env(rank, seed=0, simple_test=False, white_advantage=None):
     """

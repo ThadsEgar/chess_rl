@@ -170,12 +170,18 @@ def create_rllib_chess_env(config):
                 
                 def step(self, action):
                     result = self.env.step(action)
-                    if len(result) == 4:  # obs, reward, done, info
+                    if len(result) == 4:  # obs, reward, done, info (old style)
                         obs, reward, done, info = result
-                        return self._wrap_observation(obs), reward, done, info
-                    elif len(result) == 5:  # obs, reward, terminated, truncated, info
+                        # Convert to new Gymnasium API (obs, reward, terminated, truncated, info)
+                        return self._wrap_observation(obs), reward, done, False, info
+                    elif len(result) == 5:  # obs, reward, terminated, truncated, info (new style)
                         obs, reward, terminated, truncated, info = result
                         return self._wrap_observation(obs), reward, terminated, truncated, info
+                    else:
+                        # Handle unexpected result format
+                        print(f"WARNING: Unexpected step result format with {len(result)} elements")
+                        # Return a safe default with the correct format
+                        return self._wrap_observation(None), 0.0, True, False, {}
                 
                 def _wrap_observation(self, obs):
                     # Convert observation to Dict format if it's not already
@@ -227,6 +233,8 @@ def create_rllib_chess_env(config):
                         'action_mask': np.ones(20480, dtype=np.float32)}, {}
             
             def step(self, action):
+                # Return a default observation with the correct Gymnasium API format
+                # (obs, reward, terminated, truncated, info)
                 return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
                         'action_mask': np.ones(20480, dtype=np.float32)}, 0, True, False, {}
         
@@ -269,6 +277,9 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=1,
+        # Add metric and mode for best_checkpoint
+        metric="episode_reward_mean",
+        mode="max",
         config={
             "env": "chess_env",
             "framework": "torch",
