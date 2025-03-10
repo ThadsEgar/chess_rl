@@ -8,6 +8,20 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.utils import explained_variance
 
+# Custom Layer Normalization for 2D convolutional features
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_features, eps=1e-5):
+        super(LayerNorm2d, self).__init__()
+        self.weight = nn.Parameter(torch.ones(num_features, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(num_features, 1, 1))
+        self.eps = eps
+
+    def forward(self, x):
+        mean = x.mean(dim=(2, 3), keepdim=True)
+        std = x.std(dim=(2, 3), keepdim=True) + self.eps
+        normalized = (x - mean) / std
+        return self.weight * normalized + self.bias
+
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
@@ -51,13 +65,13 @@ class CNNMCTSActorCriticPolicy(ActorCriticPolicy):
     def _build_cnn_extractor(self):
         cnn = nn.Sequential(
             nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            LayerNorm2d(128),
             nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            LayerNorm2d(256),
             nn.ReLU(),
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            LayerNorm2d(256),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten()
@@ -633,7 +647,7 @@ class MCTSPPO(PPO):
         return True
 
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=0.5, use_layer_norm=True):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -647,10 +661,14 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
     n_envs = env.num_envs
     total_steps = n_steps * n_envs
     
-    batch_size = min(2048, n_steps)
+    # Ensure batch_size is not larger than n_steps
+    batch_size = min(batch_size, n_steps)
     
     print(f"Training with {n_envs} environments, {n_steps} steps per environment")
     print(f"Total steps per iteration: {total_steps}, batch size: {batch_size}")
+    print(f"Learning rate: {learning_rate}, epochs: {n_epochs}, clip_range: {clip_range}")
+    print(f"Max gradient norm: {max_grad_norm}")
+    print(f"Using Layer Normalization: {use_layer_norm}")
     
     if checkpoint:
         print(f'Checkpoint: {checkpoint} loaded')
@@ -660,17 +678,65 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             policy=CNNMCTSActorCriticPolicy,
             tensorboard_log=tensorboard_log, 
             verbose=1,
-            learning_rate=1e-5,
+            learning_rate=learning_rate,
             n_steps=n_steps,        # Steps to collect per environment
             batch_size=batch_size,  # Batch size for updates
-            n_epochs=4,             # Number of passes through the batch
+            n_epochs=n_epochs,      # Number of passes through the batch
             gamma=0.99,
             device=device,
-            clip_range=0.2,
+            clip_range=clip_range,
             ent_coef=0.02,
             vf_coef=0.5,
+            max_grad_norm=max_grad_norm,  # Add gradient clipping
             policy_kwargs=policy_kwargs,
         )
+        
+        # If switching from BatchNorm to LayerNorm, transfer weights for better continuity
+        if use_layer_norm and hasattr(model, 'policy') and hasattr(model.policy, 'features_extractor'):
+            try:
+                # Access the CNN part of the features_extractor
+                cnn_part = model.policy.features_extractor[0]
+                
+                # Check if we need to convert (if first layer is BatchNorm)
+                needs_conversion = False
+                for layer in cnn_part:
+                    if isinstance(layer, nn.BatchNorm2d):
+                        needs_conversion = True
+                        break
+                
+                if needs_conversion:
+                    print("Converting BatchNorm to LayerNorm for more stable training...")
+                    # Create a new features extractor with LayerNorm
+                    new_extractor = model.policy._build_features_extractor()
+                    
+                    # Copy convolutional weights
+                    layer_idx = 0
+                    for i, layer in enumerate(cnn_part):
+                        if isinstance(layer, nn.Conv2d):
+                            new_extractor[0][layer_idx].load_state_dict(layer.state_dict())
+                            layer_idx += 1  # Skip norm layer
+                        elif isinstance(layer, nn.BatchNorm2d):
+                            # For each BatchNorm layer, initialize the corresponding LayerNorm
+                            # with appropriate scale and bias
+                            new_norm = new_extractor[0][layer_idx]
+                            if isinstance(new_norm, LayerNorm2d):
+                                # Use running mean/var from BatchNorm to initialize LayerNorm
+                                new_norm.weight.data.fill_(1.0)
+                                new_norm.bias.data.fill_(0.0)
+                            layer_idx += 1
+                        else:
+                            # For other layers (ReLU, Flatten, etc.), just increment index
+                            layer_idx += 1
+                    
+                    # Copy fully connected weights
+                    new_extractor[1].load_state_dict(model.policy.features_extractor[1].state_dict())
+                    
+                    # Replace the features extractor
+                    model.policy.features_extractor = new_extractor
+                    print("Successfully converted BatchNorm to LayerNorm!")
+            except Exception as e:
+                print(f"Warning: Could not convert BatchNorm to LayerNorm: {e}")
+                print("Continuing with original model.")
     else:
         model = MCTSPPO(
             CNNMCTSActorCriticPolicy,
@@ -678,15 +744,16 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             tensorboard_log=tensorboard_log,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            learning_rate=1e-5,
+            learning_rate=learning_rate,
             n_steps=n_steps,
             batch_size=batch_size,
-            n_epochs=4, 
+            n_epochs=n_epochs, 
             gamma=0.99,
             device=device,
-            clip_range=0.2,
+            clip_range=clip_range,
             ent_coef=0.02,
             vf_coef=0.5,
+            max_grad_norm=max_grad_norm,  # Add gradient clipping
         )
     
     return model

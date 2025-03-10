@@ -179,6 +179,18 @@ def parse_arguments():
                         help='Total number of timesteps to train for')
     parser.add_argument('--save_freq', type=int, default=50000,
                         help='Frequency (in timesteps) to save model checkpoints')
+    parser.add_argument('--learning_rate', type=float, default=3e-5,
+                        help='Learning rate for the optimizer (default: 3e-5)')
+    parser.add_argument('--n_epochs', type=int, default=4,
+                        help='Number of epochs when optimizing the surrogate loss (default: 4)')
+    parser.add_argument('--batch_size', type=int, default=256,
+                        help='Batch size for training (default: 256, use smaller values like 64-256 for more stable updates)')
+    parser.add_argument('--clip_range', type=float, default=0.2,
+                        help='Clipping parameter for PPO (default: 0.2, use 0.1 for more conservative updates)')
+    parser.add_argument('--max_grad_norm', type=float, default=0.5,
+                        help='Maximum norm for gradients (default: 0.5, lower values like 0.1-0.3 for more stable updates)')
+    parser.add_argument('--use_layer_norm', action='store_true',
+                        help='Use LayerNorm instead of BatchNorm in CNN layers for more stable training')
     return parser.parse_args()
 
 def main():
@@ -262,7 +274,13 @@ def main():
         env=env,
         tensorboard_log="data/logs",
         device=device,
-        checkpoint=checkpoint
+        checkpoint=checkpoint,
+        learning_rate=args.learning_rate,
+        n_epochs=args.n_epochs,
+        batch_size=args.batch_size,
+        clip_range=args.clip_range,
+        max_grad_norm=args.max_grad_norm,
+        use_layer_norm=args.use_layer_norm
     )
     
     # Set up callbacks
