@@ -299,6 +299,12 @@ def parse_arguments():
                         help='Number of MCTS simulations during training (default: 100)')
     parser.add_argument('--mcts_eval_only', action='store_true',
                         help='Use MCTS only during evaluation, not during training')
+    parser.add_argument('--mcts_freq', type=float, default=1.0,
+                        help='Frequency to use MCTS during training (0.0-1.0, default: 1.0 = always)')
+    parser.add_argument('--mcts_envs_frac', type=float, default=1.0,
+                        help='Max fraction of environments to use MCTS on (0.0-1.0, default: 1.0 = all eligible envs)')
+    parser.add_argument('--separate_color_learning', action='store_true',
+                        help='Train separate policies for black and white (more accurate but slower)')
     return parser.parse_args()
 
 def main():
@@ -397,7 +403,10 @@ def main():
         clip_range=args.clip_range,
         max_grad_norm=args.max_grad_norm,
         mcts_sims=args.mcts_sims,
-        mcts_eval_only=args.mcts_eval_only
+        mcts_eval_only=args.mcts_eval_only,
+        mcts_freq=args.mcts_freq,
+        mcts_envs_frac=args.mcts_envs_frac,
+        separate_color_learning=args.separate_color_learning
     )
     
     # Set up callbacks

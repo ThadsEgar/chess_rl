@@ -8,6 +8,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.utils import explained_variance
 import time
+from gymnasium import spaces
 
 # Custom Layer Normalization for 2D convolutional features
 class LayerNorm2d(nn.Module):
@@ -476,10 +477,38 @@ class MCTSPPO(PPO):
         # Extract custom parameters
         self.mcts_sims = kwargs.pop('mcts_sims', 100)
         self.mcts_eval_only = kwargs.pop('mcts_eval_only', False)
+        self.mcts_freq = kwargs.pop('mcts_freq', 1.0)
+        self.mcts_envs_frac = kwargs.pop('mcts_envs_frac', 1.0)
+        self.separate_color_learning = kwargs.pop('separate_color_learning', False)
+        
+        if self.mcts_freq < 1.0:
+            print(f"Using MCTS with {self.mcts_sims} simulations at {self.mcts_freq*100:.1f}% frequency")
+            
+        if self.mcts_envs_frac < 1.0:
+            print(f"Limiting MCTS to at most {self.mcts_envs_frac*100:.1f}% of environments per step")
+            
+        if self.separate_color_learning:
+            print("Using separate experience buffers for black and white pieces")
         
         super().__init__(policy, env, **kwargs)
         
         self.last_agent_step = [None] * self.n_envs
+        
+        # Set up separate buffers for white and black if requested
+        if self.separate_color_learning:
+            # Original buffer will be used for white
+            self.white_buffer = self.rollout_buffer
+            
+            # Create a separate buffer with identical parameters for black
+            self.black_buffer = RolloutBuffer(
+                buffer_size=self.rollout_buffer.buffer_size,
+                observation_space=self.rollout_buffer.observation_space,
+                action_space=self.rollout_buffer.action_space,
+                device=self.rollout_buffer.device,
+                gae_lambda=self.rollout_buffer.gae_lambda,
+                gamma=self.rollout_buffer.gamma,
+                n_envs=self.rollout_buffer.n_envs,
+            )
         
         if self.n_envs % 2 == 0:
             half = self.n_envs // 2
@@ -548,7 +577,18 @@ class MCTSPPO(PPO):
     def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
         assert self._last_obs is not None, "No previous observation"
         n_steps = 0
-        rollout_buffer.reset()
+        
+        # Reset appropriate buffers
+        if self.separate_color_learning:
+            # Reset both color-specific buffers
+            self.white_buffer.reset()
+            self.black_buffer.reset()
+            # Point to the buffers for easier reference later
+            white_buffer = self.white_buffer
+            black_buffer = self.black_buffer
+        else:
+            # Use the provided rollout buffer for all experiences
+            rollout_buffer.reset()
         
         infos = [{} for _ in range(self.n_envs)]
         current_players = [0 for _ in range(self.n_envs)]
@@ -598,8 +638,29 @@ class MCTSPPO(PPO):
                     all_actions = all_actions.cpu().numpy()
                     
                     # Identify which environments need MCTS
-                    mcts_indices = [e for i, e in enumerate(acting_indices) 
-                                   if e in agent_turn_indices and use_mcts_in_training and self.policy.mcts is not None]
+                    mcts_indices = []
+                    if use_mcts_in_training and self.policy.mcts is not None:
+                        # Apply frequency filter - only use MCTS on a subset of states based on frequency
+                        if self.mcts_freq >= 1.0 or np.random.random() < self.mcts_freq:
+                            # Get all potential MCTS candidates
+                            potential_mcts_indices = [e for i, e in enumerate(acting_indices) 
+                                                    if e in agent_turn_indices]
+                            
+                            # Apply environment fraction limit if needed
+                            if self.mcts_envs_frac < 1.0 and potential_mcts_indices:
+                                # Calculate max number of environments to use MCTS on
+                                max_mcts_envs = max(1, int(len(potential_mcts_indices) * self.mcts_envs_frac))
+                                # Randomly select subset of environments
+                                if max_mcts_envs < len(potential_mcts_indices):
+                                    mcts_indices = np.random.choice(
+                                        potential_mcts_indices, 
+                                        size=max_mcts_envs, 
+                                        replace=False
+                                    ).tolist()
+                                else:
+                                    mcts_indices = potential_mcts_indices
+                            else:
+                                mcts_indices = potential_mcts_indices
                     
                     # If we have environments that need MCTS, process them in parallel
                     if mcts_indices:
@@ -722,14 +783,57 @@ class MCTSPPO(PPO):
                 return False
 
             # Add all transitions to buffer, not just agent's turns
-            rollout_buffer.add(
-                self._last_obs,
-                actions.reshape(self.n_envs, 1),
-                rewards,
-                self._last_episode_starts,
-                batch_values,
-                batch_log_probs
-            )
+            if self.separate_color_learning:
+                # Separate white and black experiences
+                white_indices = []
+                black_indices = []
+                
+                # Check the player color from the channel 12 of the board observation
+                for env_idx in range(self.n_envs):
+                    # Check the color of the current player (channel 12 in the observation)
+                    # 1.0 means white's turn, 0.0 means black's turn
+                    board_flat = self._last_obs['board'][env_idx]
+                    # Reconstruct the 3D board to get the player channel (channel 12)
+                    # Shape is (13, 8, 8), channel 12 indicates the current player
+                    board_3d = board_flat.reshape(13, 8, 8)
+                    player_channel = board_3d[12, 0, 0]  # Check first element of player channel
+                    
+                    if player_channel > 0.5:  # White's turn
+                        white_indices.append(env_idx)
+                    else:  # Black's turn
+                        black_indices.append(env_idx)
+                
+                # Add white player experiences to white buffer
+                if white_indices:
+                    self.white_buffer.add(
+                        {k: v[white_indices] for k, v in self._last_obs.items()},
+                        actions.reshape(self.n_envs, 1)[white_indices],
+                        rewards[white_indices],
+                        self._last_episode_starts[white_indices],
+                        batch_values[white_indices],
+                        batch_log_probs[white_indices]
+                    )
+                
+                # Add black player experiences to black buffer
+                if black_indices:
+                    self.black_buffer.add(
+                        {k: v[black_indices] for k, v in self._last_obs.items()},
+                        actions.reshape(self.n_envs, 1)[black_indices],
+                        rewards[black_indices],
+                        self._last_episode_starts[black_indices],
+                        batch_values[black_indices],
+                        batch_log_probs[black_indices]
+                    )
+            else:
+                # Original behavior: add all transitions to the same buffer
+                rollout_buffer.add(
+                    self._last_obs,
+                    actions.reshape(self.n_envs, 1),
+                    rewards,
+                    self._last_episode_starts,
+                    batch_values,
+                    batch_log_probs
+                )
 
             for env_idx in range(self.n_envs):
                 if dones[env_idx]:
@@ -794,8 +898,134 @@ class MCTSPPO(PPO):
 
         return True
 
+    def train(self) -> None:
+        """
+        Override the train method to handle separate buffers for white and black
+        """
+        if self.separate_color_learning:
+            # Train on white experiences
+            if self.white_buffer.pos > 0:  # Check if buffer has data
+                self._train_on_buffer(self.white_buffer, "white")
+            
+            # Train on black experiences
+            if self.black_buffer.pos > 0:  # Check if buffer has data
+                self._train_on_buffer(self.black_buffer, "black")
+        else:
+            # Use original PPO training with the combined buffer
+            super().train()
+    
+    def _train_on_buffer(self, buffer, color):
+        """
+        Train on a specific buffer (white or black)
+        """
+        # Reference the original rollout buffer temporarily
+        original_buffer = self.rollout_buffer
+        self.rollout_buffer = buffer
+        
+        # Print training info
+        print(f"Training on {color} experiences with {buffer.pos} steps")
+        
+        # Original PPO training code from parent class
+        self._update_learning_rate(self.policy.optimizer)
+        
+        # Initialize logging values
+        pg_losses, clip_fractions = [], []
+        value_losses, entropy_losses = [], []
+        
+        # Train for n_epochs on the rollout buffer
+        for epoch in range(self.n_epochs):
+            approx_kl_divs = []
+            # Do a complete pass on the rollout buffer
+            for rollout_data in buffer.get(self.batch_size):
+                actions = rollout_data.actions
+                if isinstance(self.action_space, spaces.Discrete):
+                    # Convert discrete action from float to long
+                    actions = actions.long().flatten()
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100, mcts_eval_only=False):
+                # Re-sample the noise matrix because the log_std has changed
+                if self.use_sde:
+                    self.policy.reset_noise(self.batch_size)
+
+                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
+                values = values.flatten()
+                # Normalize advantage
+                advantages = rollout_data.advantages
+                if self.normalize_advantage:
+                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+                # ratio between old and new policy, should be one at the first iteration
+                ratio = torch.exp(log_prob - rollout_data.old_log_prob)
+
+                # clipped surrogate loss
+                policy_loss_1 = advantages * ratio
+                policy_loss_2 = advantages * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
+                policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+
+                # Logging
+                pg_losses.append(policy_loss.item())
+                clip_fraction = torch.mean((torch.abs(ratio - 1) > self.clip_range).float()).item()
+                clip_fractions.append(clip_fraction)
+
+                if self.clip_range_vf is None:
+                    # No clipping
+                    values_pred = values
+                else:
+                    # Clip the different between old and new value
+                    # NOTE: this depends on the reward scaling
+                    values_pred = rollout_data.old_values + torch.clamp(
+                        values - rollout_data.old_values, -self.clip_range_vf, self.clip_range_vf
+                    )
+                # Value loss using the TD(gae_lambda) target
+                value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                value_losses.append(value_loss.item())
+
+                # Entropy loss favor exploration
+                if entropy is None:
+                    # Approximate entropy when no analytical form
+                    entropy_loss = -torch.mean(-log_prob)
+                else:
+                    entropy_loss = -torch.mean(entropy)
+
+                entropy_losses.append(entropy_loss.item())
+
+                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+
+                # Calculate approximate form of reverse KL Divergence for early stopping
+                # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
+                # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
+                # and Schulman blog: http://joschu.net/blog/kl-approx.html
+                with torch.no_grad():
+                    log_ratio = log_prob - rollout_data.old_log_prob
+                    approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                    approx_kl_divs.append(approx_kl_div)
+
+                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                    continue
+
+                # Optimization step
+                self.policy.optimizer.zero_grad()
+                loss.backward()
+                # Clip grad norm
+                if self.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.policy.optimizer.step()
+            
+            self._n_updates += 1
+            
+        # Calculate statistics
+        explained_var = explained_variance(buffer.values.flatten(), buffer.returns.flatten())
+        
+        # Print training statistics
+        print(f"{color.capitalize()} training: loss(p)={np.mean(pg_losses):.5f}, "
+              f"loss(v)={np.mean(value_losses):.5f}, loss(e)={np.mean(entropy_losses):.5f}, "
+              f"kl={np.mean(approx_kl_divs):.5f}, clip={np.mean(clip_fractions):.3f}, "
+              f"explained_var={explained_var:.3f}")
+        
+        # Restore original buffer
+        self.rollout_buffer = original_buffer
+
+
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100, mcts_eval_only=False, mcts_freq=1.0, mcts_envs_frac=1.0, separate_color_learning=False):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -827,8 +1057,14 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
     if mcts_eval_only:
         print(f"MCTS enabled during evaluation only with {mcts_sims} simulations")
     else:
-        print(f"MCTS enabled during both training and evaluation with {mcts_sims} simulations")
-        
+        if mcts_freq < 1.0:
+            print(f"MCTS enabled during training at {mcts_freq*100:.1f}% frequency with {mcts_sims} simulations")
+        else:
+            print(f"MCTS enabled during both training and evaluation with {mcts_sims} simulations")
+    
+    if separate_color_learning:
+        print("Using separate learning for white and black pieces")
+    
     # Use a higher learning rate for faster training
     if learning_rate > 3e-4 and not checkpoint:
         print(f"NOTE: Reducing initial learning rate to 3e-4 for stability")
@@ -863,6 +1099,9 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
         'policy_kwargs': policy_kwargs,
         'mcts_sims': mcts_sims,  # Pass MCTS simulations count
         'mcts_eval_only': mcts_eval_only,  # Whether to use MCTS only during evaluation
+        'mcts_freq': mcts_freq,  # Pass MCTS frequency
+        'mcts_envs_frac': mcts_envs_frac,  # Pass MCTS environment fraction
+        'separate_color_learning': separate_color_learning,  # Enable separate learning for black and white
     }
     
     # Add max_grad_norm only if it's not None
