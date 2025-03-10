@@ -150,7 +150,7 @@ def train(args):
         stop={"training_iteration": args.max_iterations},
         checkpoint_freq=args.checkpoint_interval,
         checkpoint_at_end=True,
-        local_dir=checkpoint_dir,
+        storage_path=checkpoint_dir,
         verbose=1,
         config={
             "env": "chess_env",
