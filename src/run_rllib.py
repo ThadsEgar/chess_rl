@@ -14,7 +14,6 @@ from pathlib import Path
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO
-from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from ray.rllib.models import ModelCatalog
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.framework import try_import_torch
@@ -137,42 +136,35 @@ def train(args):
     # Register the custom model
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
     
-    # Configure the algorithm - use AlgorithmConfig directly
-    config = (
-        AlgorithmConfig()
-        .environment(create_rllib_chess_env)
-        .framework("torch")
-        .env_runners(num_env_runners=args.num_workers)
-        .training(
-            model={
-                "custom_model": "chess_masked_model",
-                "custom_model_config": {}
-            },
-            train_batch_size=4000,
-            sgd_minibatch_size=128,
-            num_sgd_iter=10,
-            lr=3e-4,
-            gamma=0.99,
-            lambda_=0.95,
-            clip_param=0.2,
-            vf_clip_param=10.0,
-            entropy_coeff=0.01,
-            vf_loss_coeff=0.5
-        )
-        .resources(
-            num_gpus=1 if args.device == "cuda" and not args.force_cpu else 0,
-            num_cpus_per_worker=1
-        )
-    )
+    # Create a config dictionary
+    config = {
+        "env": create_rllib_chess_env,
+        "framework": "torch",
+        "num_workers": args.num_workers,
+        "num_gpus": 1 if args.device == "cuda" and not args.force_cpu else 0,
+        "model": {
+            "custom_model": "chess_masked_model",
+            "custom_model_config": {},
+        },
+        # PPO specific configs
+        "gamma": 0.99,
+        "lambda": 0.95,
+        "kl_coeff": 0.2,
+        "train_batch_size": 4000,
+        "sgd_minibatch_size": 128,
+        "num_sgd_iter": 10,
+        "lr": 3e-4,
+        "clip_param": 0.2,
+        "vf_clip_param": 10.0,
+        "entropy_coeff": 0.01,
+        "vf_loss_coeff": 0.5,
+        # Checkpointing
+        "checkpoint_freq": args.checkpoint_interval,
+        "checkpoint_at_end": True,
+        "local_dir": args.checkpoint_dir
+    }
     
-    # Add checkpoint config
-    config = config.checkpointing(
-        checkpoint_frequency=args.checkpoint_interval,
-        checkpoint_at_end=True,
-        checkpoint_dir=args.checkpoint_dir
-    )
-    
-    # Run training
+    # Create the algorithm with the config
     algorithm = PPO(config=config)
     
     # Train for the specified number of iterations
