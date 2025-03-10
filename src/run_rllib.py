@@ -18,6 +18,7 @@ from ray.rllib.models import ModelCatalog
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_utils import FLOAT_MAX
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
 # Import custom environment
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -269,6 +270,78 @@ def train(args):
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Using checkpoint directory: {checkpoint_dir}")
     
+    # Define a custom callback to track chess game outcomes
+    class ChessMetricsCallback(DefaultCallbacks):
+        """Custom callbacks for tracking chess game statistics"""
+        
+        def __init__(self):
+            super().__init__()
+            # Track metrics across episodes
+            self.white_wins = 0
+            self.black_wins = 0
+            self.draws = 0
+            self.total_games = 0
+        
+        def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+            """Called when an episode ends, to track game outcomes"""
+            # Get info dict from the episode
+            info = episode.last_info_for()
+            
+            # Record chess-specific metrics from the episode
+            if info.get("white_won", False):
+                self.white_wins += 1
+                episode.custom_metrics["white_win"] = 1.0
+            else:
+                episode.custom_metrics["white_win"] = 0.0
+                
+            if info.get("black_won", False):
+                self.black_wins += 1
+                episode.custom_metrics["black_win"] = 1.0
+            else:
+                episode.custom_metrics["black_win"] = 0.0
+                
+            if info.get("draw", False):
+                self.draws += 1
+                episode.custom_metrics["draw"] = 1.0
+            else:
+                episode.custom_metrics["draw"] = 0.0
+            
+            self.total_games += 1
+            
+            # Calculate win/draw percentages
+            if self.total_games > 0:
+                white_win_pct = self.white_wins / self.total_games * 100
+                black_win_pct = self.black_wins / self.total_games * 100
+                draw_pct = self.draws / self.total_games * 100
+                
+                # Log overall statistics as custom metrics
+                episode.custom_metrics["white_win_pct"] = white_win_pct
+                episode.custom_metrics["black_win_pct"] = black_win_pct 
+                episode.custom_metrics["draw_pct"] = draw_pct
+                
+                # Also log raw counts
+                episode.custom_metrics["white_wins_count"] = self.white_wins
+                episode.custom_metrics["black_wins_count"] = self.black_wins
+                episode.custom_metrics["draws_count"] = self.draws
+                episode.custom_metrics["total_games"] = self.total_games
+            
+        def on_train_result(self, *, algorithm, result, **kwargs):
+            """Called after each training iteration, to log chess statistics"""
+            # Extract metrics and print a summary
+            metrics = result["env_runners"]
+            
+            # Check if we have custom metrics
+            if "custom_metrics" in metrics:
+                custom_metrics = metrics["custom_metrics"]
+                
+                # Print a summary of game outcomes
+                print("\n========== CHESS GAME OUTCOMES ==========")
+                print(f"White Wins: {custom_metrics.get('white_wins_count', 0)} ({custom_metrics.get('white_win_pct', 0):.1f}%)")
+                print(f"Black Wins: {custom_metrics.get('black_wins_count', 0)} ({custom_metrics.get('black_win_pct', 0):.1f}%)")
+                print(f"Draws:      {custom_metrics.get('draws_count', 0)} ({custom_metrics.get('draw_pct', 0):.1f}%)")
+                print(f"Total Games: {custom_metrics.get('total_games', 0)}")
+                print("=========================================\n")
+    
     # Configure RLlib using Ray Tune directly to bypass API version issues
     analysis = tune.run(
         "PPO",
@@ -304,6 +377,8 @@ def train(args):
             "vf_clip_param": 10.0,
             "entropy_coeff": 0.01,
             "vf_loss_coeff": 0.5,
+            # Register our custom callbacks
+            "callbacks": ChessMetricsCallback,
             # Completely bypass validation
             "_enable_new_api_stack": False,
             "_experimental_enable_new_api_stack": False,
