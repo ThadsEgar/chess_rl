@@ -139,13 +139,18 @@ def train(args):
     # Register the environment
     tune.register_env("chess_env", create_rllib_chess_env)
     
+    # Create an absolute path for checkpoint directory
+    checkpoint_dir = os.path.abspath(args.checkpoint_dir)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Using checkpoint directory: {checkpoint_dir}")
+    
     # Configure RLlib using Ray Tune directly to bypass API version issues
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
         checkpoint_freq=args.checkpoint_interval,
         checkpoint_at_end=True,
-        storage_path=args.checkpoint_dir,
+        local_dir=checkpoint_dir,
         verbose=1,
         config={
             "env": "chess_env",
@@ -220,9 +225,6 @@ def main():
                         help="Render environment during evaluation")
     
     args = parser.parse_args()
-    
-    # Create checkpoint directory if it doesn't exist
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
     
     # Run in appropriate mode
     if args.mode == "train":
