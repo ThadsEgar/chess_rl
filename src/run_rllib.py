@@ -281,21 +281,43 @@ def train(args):
             self.black_wins = 0
             self.draws = 0
             self.total_games = 0
+            self.total_episodes = 0
+            self.completed_episodes = 0
+            self.truncated_episodes = 0
+        
+        def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+            """Called when an episode starts"""
+            print(f"\n==== STARTING NEW EPISODE #{self.total_episodes + 1} ====")
         
         def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
             """Called when an episode ends, to track game outcomes"""
+            # Increment episode counter
+            self.total_episodes += 1
+            
             # Get info dict from the episode
             info = episode.last_info_for()
             
             # Debug: Print episode length and termination reason
             episode_steps = episode.length
-            print(f"Episode ended after {episode_steps} steps. Info: {info}")
+            truncated = episode.batch_builder.policy_collectors["default_policy"].agent_collectors[0].last_unrolled_output.get("truncated", False)
+            
+            print(f"\n==== EPISODE #{self.total_episodes} ENDED ====")
+            print(f"Episode length: {episode_steps} steps")
+            print(f"Episode reward: {episode.total_reward}")
+            print(f"Episode truncated: {truncated}")
+            print(f"Last info: {info}")
+            
+            # Track if episode was truncated
+            if truncated:
+                self.truncated_episodes += 1
+                print("⚠️ EPISODE TRUNCATED: Hit maximum steps limit")
             
             # Only count completed games (where we have a game_outcome)
             # This avoids counting episodes that end for other reasons
             if "game_outcome" in info:
+                self.completed_episodes += 1
                 game_outcome = info["game_outcome"]
-                print(f"✓ GAME COMPLETED: {game_outcome}")
+                print(f"✓ GAME COMPLETED: {game_outcome} - Reason: {info.get('termination_reason', 'unknown')}")
                 
                 # Initialize metrics
                 episode.custom_metrics["white_win"] = 0.0
@@ -315,7 +337,11 @@ def train(args):
                 
                 self.total_games += 1
             else:
-                print("✘ GAME NOT COMPLETED: Episode ended without a game outcome")
+                print("⚠️ GAME NOT COMPLETED: Episode ended without a game outcome")
+            
+            # Add episode metrics
+            episode.custom_metrics["episode_truncated"] = 1.0 if truncated else 0.0
+            episode.custom_metrics["episode_completed"] = 1.0 if "game_outcome" in info else 0.0
             
             # Calculate win/draw percentages
             if self.total_games > 0:
@@ -333,7 +359,12 @@ def train(args):
                 episode.custom_metrics["black_wins_count"] = self.black_wins
                 episode.custom_metrics["draws_count"] = self.draws
                 episode.custom_metrics["total_games"] = self.total_games
-            
+                
+            # Track episode statistics
+            episode.custom_metrics["total_episodes"] = self.total_episodes
+            episode.custom_metrics["completed_episodes"] = self.completed_episodes
+            episode.custom_metrics["truncated_episodes"] = self.truncated_episodes
+        
         def on_train_result(self, *, algorithm, result, **kwargs):
             """Called after each training iteration, to log chess statistics"""
             # Extract metrics and print a summary
@@ -344,12 +375,24 @@ def train(args):
                 custom_metrics = metrics["custom_metrics"]
                 
                 # Print a summary of game outcomes
-                print("\n========== CHESS GAME OUTCOMES ==========")
-                print(f"White Wins: {custom_metrics.get('white_wins_count', 0)} ({custom_metrics.get('white_win_pct', 0):.1f}%)")
-                print(f"Black Wins: {custom_metrics.get('black_wins_count', 0)} ({custom_metrics.get('black_win_pct', 0):.1f}%)")
-                print(f"Draws:      {custom_metrics.get('draws_count', 0)} ({custom_metrics.get('draw_pct', 0):.1f}%)")
-                print(f"Total Games: {custom_metrics.get('total_games', 0)}")
-                print("=========================================\n")
+                print("\n========== CHESS TRAINING SUMMARY ==========")
+                print("GAME OUTCOMES:")
+                print(f"  White Wins: {custom_metrics.get('white_wins_count', 0)} ({custom_metrics.get('white_win_pct', 0):.1f}%)")
+                print(f"  Black Wins: {custom_metrics.get('black_wins_count', 0)} ({custom_metrics.get('black_win_pct', 0):.1f}%)")
+                print(f"  Draws:      {custom_metrics.get('draws_count', 0)} ({custom_metrics.get('draw_pct', 0):.1f}%)")
+                print(f"  Total Completed Games: {custom_metrics.get('total_games', 0)}")
+                print("\nEPISODE STATISTICS:")
+                print(f"  Total Episodes:       {custom_metrics.get('total_episodes', 0)}")
+                print(f"  Completed Episodes:   {custom_metrics.get('completed_episodes', 0)}")
+                print(f"  Truncated Episodes:   {custom_metrics.get('truncated_episodes', 0)}")
+                
+                # Calculate and print completion rate
+                total = custom_metrics.get('total_episodes', 0)
+                if total > 0:
+                    completion_rate = custom_metrics.get('completed_episodes', 0) / total * 100
+                    print(f"  Episode Completion Rate: {completion_rate:.1f}%")
+                
+                print("===========================================\n")
     
     # Configure RLlib using Ray Tune directly to bypass API version issues
     analysis = tune.run(

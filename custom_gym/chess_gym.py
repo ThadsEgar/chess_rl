@@ -295,28 +295,54 @@ class ChessEnv(gym.Env):
             self.board.push(move)
             self.move_count += 1
             
+            # DEBUG: Print current game state
+            print(f"Move #{self.move_count}: {move}, FEN: {self.board.fen()}")
+            
             # Check if the game is over
             info = {}
             reward = 0
             
-            if self.board.is_checkmate():
+            # DEBUG: Check game state in detail
+            checkmate = self.board.is_checkmate()
+            stalemate = self.board.is_stalemate()
+            insufficient = self.board.is_insufficient_material()
+            fifty_move = self.board.is_fifty_moves()
+            repetition = self.board.is_repetition()
+            
+            print(f"Game state: checkmate={checkmate}, stalemate={stalemate}, insufficient={insufficient}, " 
+                  f"fifty_move={fifty_move}, repetition={repetition}")
+            
+            if checkmate:
                 self.done = True
                 # Who won?
                 if self.board.turn:  # Black's turn now, so White won
                     reward = 1.0 if self.board.turn == chess.BLACK else -1.0
                     info["white_won"] = True
                     info["game_outcome"] = "white_win"
+                    print("WHITE WON BY CHECKMATE")
                 else:  # White's turn now, so Black won
                     reward = 1.0 if self.board.turn == chess.WHITE else -1.0
                     info["black_won"] = True
                     info["game_outcome"] = "black_win"
+                    print("BLACK WON BY CHECKMATE")
                     
-            elif self.board.is_stalemate() or self.board.is_insufficient_material() or \
-                 self.board.is_fifty_moves() or self.board.is_repetition():
+            elif stalemate or insufficient or fifty_move or repetition:
                 self.done = True
                 reward = 0.0
                 info["draw"] = True
                 info["game_outcome"] = "draw"
+                if stalemate:
+                    info["termination_reason"] = "stalemate"
+                    print("DRAW BY STALEMATE")
+                elif insufficient:
+                    info["termination_reason"] = "insufficient_material"
+                    print("DRAW BY INSUFFICIENT MATERIAL")
+                elif fifty_move:
+                    info["termination_reason"] = "fifty_move_rule"
+                    print("DRAW BY FIFTY MOVE RULE")
+                elif repetition:
+                    info["termination_reason"] = "threefold_repetition"
+                    print("DRAW BY THREEFOLD REPETITION")
                 
             # Small negative reward per move to encourage efficiency
             if not self.done:
