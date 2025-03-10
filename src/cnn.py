@@ -684,12 +684,6 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
     print(f"Max gradient norm: {max_grad_norm}")
     print(f"Using normalization: NO (removed for stability)")
     print(f"Using learning rate schedule: YES (linear decay)")
-    print(f"Target KL divergence: {target_kl} (will stop updating if exceeded)")
-    
-    # Use a lower learning rate when not using normalization
-    if learning_rate > 1e-5 and not checkpoint:
-        print(f"NOTE: Reducing initial learning rate to 1e-5 for better stability without normalization")
-        learning_rate = 1e-5
     
     # Create a linear learning rate schedule
     def linear_schedule(progress_remaining):
