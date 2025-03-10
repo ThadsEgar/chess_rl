@@ -1,6 +1,20 @@
 name: chess_rl
 channels:
-  - defaults
+  - conda-forge
+  - pytorch
 dependencies:
-  - python=3.12
-prefix: /Users/michael/anaconda3/envs/chess_rl
+  - python=3.10
+  - pip
+  - pytorch
+  - torchvision
+  - cudatoolkit
+  - psutil
+  - pip:
+    - ray
+    - python-chess
+    - pyspiel
+    - gymnasium
+    - numpy
+    - matplotlib
+    - tensorboard
+    - pyyaml

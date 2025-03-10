@@ -3,10 +3,11 @@ import os
 import sys
 import numpy as np
 import argparse
-from stable_baselines3 import PPO
+import torch
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 import chess
-import torch
+
+from src.chess_model import ChessCNN
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -18,156 +19,209 @@ def human_move(env):
             move = chess.Move.from_uci(move_str)
             board = env.state.board if isinstance(env.state.board, chess.Board) else env.state.board()
             legal_moves = list(board.legal_moves)
-            if move not in legal_moves:
-                print("That move is not legal. Try again.")
-                continue
-            action = env.move_to_action(move)
-            if action not in env.state.legal_actions():
-                print("Computed action is illegal. Try again.")
-                continue
-            return action
+            
+            if move in legal_moves:
+                action = env.move_to_action(move)
+                return action
+            else:
+                print("Illegal move. Please try again.")
         except Exception as e:
-            print(f"Error: {e}. Please enter a valid move.")
+            print(f"Invalid move format. Use UCI format (e.g., e2e4). Error: {e}")
 
 def print_board_and_info(env, reward, info, player_mode, human_color=None, white_action=None, black_action=None):
-    # Access the unwrapped environment for rendering and state information
-    unwrapped_env = env.env if hasattr(env, 'env') else env
+    clear_screen()
     
-    unwrapped_env.render()
+    # Print the board
+    board_str = str(env.board)
     
-    current_player = 'White' if unwrapped_env.state.current_player() == 0 else 'Black'
-    if player_mode == 'human_vs_ai':
-        turn_info = f"Turn: {current_player} ({'Human' if current_player[0].lower() == human_color else 'Model'})"
-    else:  # ai_vs_ai
-        turn_info = f"Turn: {current_player} (AI)"
+    # Determine which player is to move
+    current_player = "White" if env.board.turn else "Black"
     
-    print(turn_info)
-    if player_mode == 'ai_vs_ai':
-        if white_action is not None and current_player == 'White':
-            print(f"White (AI) plays: {white_action}")
-        elif black_action is not None and current_player == 'Black':
-            print(f"Black (AI) plays: {black_action}")
-        else:
-            print()  # Empty line if no move yet
-    elif player_mode == 'human_vs_ai' and current_player[0].lower() != human_color:
-        action_to_show = white_action if current_player == 'White' else black_action
-        if action_to_show is not None:
-            print(f"Model plays: {action_to_show}")
-        else:
-            print()  # Empty line if no move yet
-    else:
-        print()  # Empty line for alignment
+    # Print header with information
+    print("\n===== CHESS RL =====")
+    print(f"Mode: {player_mode}")
+    if human_color is not None:
+        print(f"Human playing as: {'White' if human_color == 'white' else 'Black'}")
+    print(f"Turn: {current_player} to move")
     
-    print(f"Reward: {reward}, Move Count: {info.get('move_count', 'N/A')}")
+    # Format the last move information
+    last_move_info = ""
+    if white_action is not None:
+        try:
+            white_move = env.action_to_move(white_action)
+            last_move_info += f"\nWhite's last move: {white_move.uci()}"
+        except:
+            last_move_info += f"\nWhite's last action: {white_action}"
+    
+    if black_action is not None:
+        try:
+            black_move = env.action_to_move(black_action)
+            last_move_info += f"\nBlack's last move: {black_move.uci()}"
+        except:
+            last_move_info += f"\nBlack's last action: {black_action}"
+    
+    print(last_move_info)
+    
+    # Print reward if applicable
+    if reward is not None:
+        print(f"Reward: {reward}")
+    
+    # Print game outcome if available
+    if info.get('white_won', False):
+        print("\n### White won! ###")
+    elif info.get('black_won', False):
+        print("\n### Black won! ###")
+    elif info.get('draw', False):
+        print("\n### Draw! ###")
+    
+    # Print the chess board
+    print("\n" + board_str)
+    
+    # Print legal moves for better user experience
+    legal_moves = list(env.board.legal_moves)
+    print("\nLegal moves:", " ".join([move.uci() for move in legal_moves]))
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Test a trained chess model')
-    parser.add_argument('--model', type=str, default="data/models/chess_model_59999904_steps",
-                        help='Path to the trained model file')
-    parser.add_argument('--mode', type=str, choices=['human_vs_ai', 'ai_vs_ai'], default='human_vs_ai',
-                        help='Game mode: human_vs_ai or ai_vs_ai')
-    parser.add_argument('--color', type=str, choices=['w', 'b'], default='w',
-                        help='Human player color (w for white, b for black)')
-    parser.add_argument('--delay', type=float, default=0.5,
-                        help='Delay between AI moves in seconds')
+    parser = argparse.ArgumentParser(description="Test a trained chess model")
+    parser.add_argument("--model", type=str, help="Path to the model checkpoint")
+    parser.add_argument("--mode", choices=["ai_vs_ai", "human_vs_ai", "human_vs_human"], default="human_vs_ai", 
+                       help="Game mode (ai_vs_ai, human_vs_ai, human_vs_human)")
+    parser.add_argument("--color", choices=["white", "black"], default="white",
+                       help="Human player color when playing against AI")
+    parser.add_argument("--delay", type=float, default=1.0,
+                       help="Delay between AI moves in seconds")
+    parser.add_argument("--mcts_sims", type=int, default=100,
+                       help="Number of MCTS simulations for AI moves")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                       help="Device to use (cuda or cpu)")
+    
     return parser.parse_args()
 
 def main():
     # Parse command line arguments
     args = parse_arguments()
     
-    # Create environment with action mask wrapper
-    base_env = ChessEnv()
-    env = ActionMaskWrapper(base_env)
-    obs, info = env.reset()
+    # Create the environment
+    env = ChessEnv()
+    env = ActionMaskWrapper(env)
+    obs = env.reset()
     
-    # If no command line arguments, ask interactively
-    if len(sys.argv) == 1:
-        mode = input("Choose game mode (1: Human vs AI, 2: AI vs AI): ").strip()
-        player_mode = 'human_vs_ai' if mode == '1' else 'ai_vs_ai'
+    # Load the model if needed for AI players
+    model = None
+    if args.mode != "human_vs_human" and args.model:
+        # Load the PyTorch model
+        model = ChessCNN().to(args.device)
+        checkpoint = torch.load(args.model, map_location=args.device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
         
-        human_color = None
-        if player_mode == 'human_vs_ai':
-            human_color = input("Choose your color (w for white, b for black): ").strip().lower()
-            if human_color not in ['w', 'b']:
-                print("Invalid choice, defaulting to white.")
-                human_color = 'w'
-                
-        model_path = input("Enter path to model (or press Enter for default): ").strip()
-        if not model_path:
-            model_path = "data/models/chess_model_59999904_steps"
-    else:
-        # Use command line arguments
-        player_mode = args.mode
-        human_color = args.color if player_mode == 'human_vs_ai' else None
-        model_path = args.model
+        # Initialize MCTS
+        if args.mcts_sims > 0:
+            model.init_mcts(num_simulations=args.mcts_sims)
+        
+        print(f"Model loaded from {args.model}")
     
-    print(f"Loading model from: {model_path}")
-    try:
-        model = PPO.load(model_path)
-        model.policy.set_training_mode(False)  # Ensure testing mode
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Available models:")
-        for file in os.listdir("data/models"):
-            if file.endswith(".zip"):
-                print(f"  - data/models/{file}")
-        return
-    
+    # Game loop
     done = False
     reward = 0
+    info = {}
     white_action = None
     black_action = None
     
-    while not done:
-        print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
-        
-        # Get current player from the unwrapped environment
-        current_player = base_env.state.current_player()
-        current_player_str = 'w' if current_player == 0 else 'b'
-        
-        if player_mode == 'human_vs_ai' and current_player_str == human_color:
-            action = human_move(base_env)  # Use unwrapped env for human moves
-            if current_player == 0:
-                white_action = action
-            else:
-                black_action = action
-        else:
-            # Model prediction
-            try:
-                # The model expects a specific observation format
-                # Predict the action using the model
-                action, _ = model.predict(obs, deterministic=True)
-                
-                if current_player == 0:
-                    white_action = action
-                else:
-                    black_action = action
-                
-                print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
-                sleep(args.delay if len(sys.argv) > 1 else 0.5)
-            except Exception as e:
-                print(f"Error during model prediction: {e}")
-                # Fallback to random legal move
-                legal_actions = base_env.state.legal_actions()
-                action = np.random.choice(legal_actions)
-                print(f"Falling back to random move: {action}")
-                if current_player == 0:
-                    white_action = action
-                else:
-                    black_action = action
-        
-        obs, reward, done, truncated, info = env.step(action)
+    # Print initial board
+    print_board_and_info(env, reward, info, args.mode, 
+                        args.color if args.mode == "human_vs_ai" else None,
+                        white_action, black_action)
     
-    print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
-    print("\nGame over!")
-    if info.get('white_won', False):
-        print("White won!")
-    elif info.get('black_won', False):
-        print("Black won!")
-    else:
-        print("Draw!")
-    sleep(2)
+    while not done:
+        # Determine current player (White=1, Black=0)
+        current_player = 1 if env.board.turn else 0
+        
+        # Determine who makes the move based on the game mode
+        if args.mode == "human_vs_human":
+            # Both players are human
+            action = human_move(env)
+        elif args.mode == "ai_vs_ai":
+            # Both players are AI
+            obs_dict = {
+                'board': torch.FloatTensor(obs['board']).unsqueeze(0).to(args.device),
+                'action_mask': torch.FloatTensor(obs['action_mask']).unsqueeze(0).to(args.device)
+            }
+            
+            if args.mcts_sims > 0:
+                # Use MCTS
+                state = env.board.copy()
+                action, _ = model.mcts.search(state)
+            else:
+                # Use model directly
+                with torch.no_grad():
+                    result = model(obs_dict, deterministic=True)
+                    action = result['actions'][0].item()
+            
+            # Add a delay to see AI moves
+            sleep(args.delay)
+        else:  # human_vs_ai
+            human_plays_white = args.color == "white"
+            
+            if (current_player == 1 and human_plays_white) or (current_player == 0 and not human_plays_white):
+                # Human's turn
+                action = human_move(env)
+            else:
+                # AI's turn
+                obs_dict = {
+                    'board': torch.FloatTensor(obs['board']).unsqueeze(0).to(args.device),
+                    'action_mask': torch.FloatTensor(obs['action_mask']).unsqueeze(0).to(args.device)
+                }
+                
+                if args.mcts_sims > 0:
+                    # Use MCTS
+                    state = env.board.copy()
+                    action, _ = model.mcts.search(state)
+                else:
+                    # Use model directly
+                    with torch.no_grad():
+                        result = model(obs_dict, deterministic=True)
+                        action = result['actions'][0].item()
+                
+                # Add a delay to see AI moves
+                sleep(args.delay)
+        
+        # Take the action
+        obs, reward, done, info = env.step(action)
+        
+        # Record the last action
+        if current_player == 1:  # White
+            white_action = action
+        else:  # Black
+            black_action = action
+        
+        # Print the updated board
+        print_board_and_info(env, reward, info, args.mode, 
+                            args.color if args.mode == "human_vs_ai" else None,
+                            white_action, black_action)
+        
+        # If game is over, display result
+        if done:
+            if info.get('white_won', False):
+                print("\n### White won! ###")
+            elif info.get('black_won', False):
+                print("\n### Black won! ###")
+            else:
+                print("\n### Draw! ###")
+            
+            # Ask if the player wants to play again
+            if args.mode != "ai_vs_ai":
+                play_again = input("\nPlay again? (y/n): ").strip().lower()
+                if play_again == 'y':
+                    obs = env.reset()
+                    done = False
+                    reward = 0
+                    info = {}
+                    white_action = None
+                    black_action = None
+                    print_board_and_info(env, reward, info, args.mode, 
+                                         args.color if args.mode == "human_vs_ai" else None,
+                                         white_action, black_action)
 
 if __name__ == "__main__":
     main()

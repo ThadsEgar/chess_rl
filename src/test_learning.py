@@ -1,204 +1,146 @@
 import numpy as np
 import os
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
-from src.train import make_env
-from src.cnn import MCTSPPO, CNNMCTSActorCriticPolicy
 import argparse
 from collections import defaultdict
 import torch
+from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
+from src.chess_model import ChessCNN
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', type=str, required=True, 
-                        help='Path to the model checkpoint to evaluate')
-    parser.add_argument('--n_games', type=int, default=100,
-                        help='Number of games to evaluate')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
-                        help='Device to use for evaluation')
+    parser = argparse.ArgumentParser(description='Evaluate a trained chess model')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to the saved model')
+    parser.add_argument('--n_games', type=int, default=100, help='Number of games to play against random')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to run evaluation on (cuda or cpu)')
     return parser.parse_args()
 
 def evaluate_vs_random(model_path, n_games=100, device='cuda'):
-    """Evaluate a model against random play to verify learning."""
-    print(f"Evaluating model {model_path} against random play...")
+    """
+    Evaluate a trained model against a random agent.
+    """
+    # Create environment
+    env = ChessEnv()
+    env = ActionMaskWrapper(env)
     
-    # Create environments for evaluation
-    n_envs = min(8, n_games // 2)  # Use at most 8 parallel environments
+    # Load model
+    model = ChessCNN().to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
     
-    # Create separate environments for testing as white and black
-    white_envs = [make_env(i) for i in range(n_envs)]
-    black_envs = [make_env(i + n_envs) for i in range(n_envs)]
+    print(f"Model loaded from {model_path}")
     
-    white_env = SubprocVecEnv(white_envs)
-    black_env = SubprocVecEnv(black_envs)
+    # Initialize MCTS if using it for evaluation
+    use_mcts = True
+    if use_mcts:
+        model.init_mcts(num_simulations=100)
+        print("Using MCTS for evaluation")
     
-    white_env = VecMonitor(white_env)
-    black_env = VecMonitor(black_env)
+    # Tracking statistics
+    stats = {
+        'white_wins': 0,
+        'black_wins': 0,
+        'draws': 0,
+        'game_lengths': []
+    }
     
-    # Load the model
-    try:
-        # We'll load the model twice, once for each set of environments
-        white_model = MCTSPPO.load(model_path, env=white_env, device=device)
-        black_model = MCTSPPO.load(model_path, env=black_env, device=device)
-        print(f"Successfully loaded model from {model_path}")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return
-    
-    # Statistics
-    white_stats = defaultdict(int)
-    black_stats = defaultdict(int)
-    
-    # Test model playing as WHITE against random BLACK
-    print("\n=== Testing model as WHITE against random BLACK ===")
-    white_games_played = 0
-    white_obs = white_env.reset()
-    
-    # Create a random agent for black
-    def random_action(obs):
-        actions = []
-        for o in obs:
-            action_mask = o['action_mask']
-            legal_actions = np.where(action_mask > 0.5)[0]
-            actions.append(np.random.choice(legal_actions))
-        return np.array(actions)
-    
-    # Play games with model as white
-    while white_games_played < n_games // 2:
-        # White's turn (model)
-        white_action, _ = white_model.predict(white_obs, deterministic=True)
-        white_obs, _, white_done, white_info = white_env.step(white_action)
+    for game in range(n_games):
+        # Reset environment
+        obs = env.reset()
+        done = False
+        step = 0
         
-        # If black's turn and not done, make random move
-        for env_idx, done in enumerate(white_done):
-            if not done and white_info[env_idx].get('current_player') == 0:  # Black's turn
-                # Get observation for this environment
-                black_action = random_action([white_obs[env_idx]])[0]
-                # Make black's move
-                single_obs, _, single_done, single_info = white_env.step(
-                    np.array([black_action if i == env_idx else 0 for i in range(n_envs)])
-                )
-                # Update observation
-                white_obs[env_idx] = single_obs[env_idx]
-                white_done[env_idx] = single_done[env_idx]
-                white_info[env_idx] = single_info[env_idx]
+        # Choose who plays as model (random)
+        model_plays_white = np.random.choice([True, False])
+        current_player = 1  # White starts
         
-        # Check for game completions
-        for i, d in enumerate(white_done):
-            if d and white_games_played < n_games // 2:
-                white_games_played += 1
+        while not done:
+            # Determine if it's the model's turn
+            model_turn = (model_plays_white and current_player == 1) or (not model_plays_white and current_player == 0)
+            
+            if model_turn:
+                # Model's turn
+                obs_dict = {
+                    'board': torch.FloatTensor(obs['board']).unsqueeze(0).to(device),
+                    'action_mask': torch.FloatTensor(obs['action_mask']).unsqueeze(0).to(device)
+                }
                 
-                # Record outcome (from model's perspective as WHITE)
-                if white_info[i].get('white_won', False):
-                    white_stats['wins'] += 1
-                elif white_info[i].get('black_won', False):
-                    white_stats['losses'] += 1
+                if use_mcts:
+                    # Use MCTS for action selection
+                    state = env.board.copy()
+                    action, _ = model.mcts.search(state)
                 else:
-                    white_stats['draws'] += 1
-                
-                # Reset this environment
-                single_obs = white_env.reset(indices=[i])
-                white_obs[i] = single_obs[i]
-                white_done[i] = False
-                
-                # Log progress
-                if white_games_played % 10 == 0:
-                    print(f"Completed {white_games_played}/{n_games//2} games as WHITE")
-    
-    # Test model playing as BLACK against random WHITE
-    print("\n=== Testing model as BLACK against random WHITE ===")
-    black_games_played = 0
-    black_obs = black_env.reset()
-    
-    # Play games with model as black
-    while black_games_played < n_games // 2:
-        # First we need to make a random move as white
-        for env_idx in range(n_envs):
-            if not black_done[env_idx] if 'black_done' in locals() else True:
-                if black_info[env_idx].get('current_player', 1) == 1:  # White's turn
-                    # Get random action for white
-                    white_action = random_action([black_obs[env_idx]])[0]
-                    # Make white's move
-                    single_obs, _, single_done, single_info = black_env.step(
-                        np.array([white_action if i == env_idx else 0 for i in range(n_envs)])
-                    )
-                    # Update observation
-                    black_obs[env_idx] = single_obs[env_idx]
-                    if 'black_done' in locals():
-                        black_done[env_idx] = single_done[env_idx]
-                    black_info[env_idx] = single_info[env_idx]
-        
-        # Black's turn (model)
-        black_action, _ = black_model.predict(black_obs, deterministic=True)
-        black_obs, _, black_done, black_info = black_env.step(black_action)
-        
-        # Check for game completions
-        for i, d in enumerate(black_done):
-            if d and black_games_played < n_games // 2:
-                black_games_played += 1
-                
-                # Record outcome (from model's perspective as BLACK)
-                if black_info[i].get('black_won', False):
-                    black_stats['wins'] += 1
-                elif black_info[i].get('white_won', False):
-                    black_stats['losses'] += 1
-                else:
-                    black_stats['draws'] += 1
-                
-                # Reset this environment
-                single_obs = black_env.reset(indices=[i])
-                black_obs[i] = single_obs[i]
-                black_done[i] = False
-                
-                # Log progress
-                if black_games_played % 10 == 0:
-                    print(f"Completed {black_games_played}/{n_games//2} games as BLACK")
-    
-    # Calculate win rates
-    white_win_rate = white_stats['wins'] / (n_games // 2) * 100
-    white_draw_rate = white_stats['draws'] / (n_games // 2) * 100
-    white_loss_rate = white_stats['losses'] / (n_games // 2) * 100
-    
-    black_win_rate = black_stats['wins'] / (n_games // 2) * 100
-    black_draw_rate = black_stats['draws'] / (n_games // 2) * 100
-    black_loss_rate = black_stats['losses'] / (n_games // 2) * 100
-    
-    overall_win_rate = (white_stats['wins'] + black_stats['wins']) / n_games * 100
-    
-    print("\n===== EVALUATION RESULTS =====")
-    print(f"Model: {os.path.basename(model_path)}")
-    print(f"Total games played: {n_games}")
-    
-    print("\nAs WHITE:")
-    print(f"Wins: {white_stats['wins']} ({white_win_rate:.1f}%)")
-    print(f"Draws: {white_stats['draws']} ({white_draw_rate:.1f}%)")
-    print(f"Losses: {white_stats['losses']} ({white_loss_rate:.1f}%)")
-    
-    print("\nAs BLACK:")
-    print(f"Wins: {black_stats['wins']} ({black_win_rate:.1f}%)")
-    print(f"Draws: {black_stats['draws']} ({black_draw_rate:.1f}%)")
-    print(f"Losses: {black_stats['losses']} ({black_loss_rate:.1f}%)")
-    
-    print(f"\nOverall win rate: {overall_win_rate:.1f}%")
-    
-    # Compare to random baseline (~2.5% win rate for each side)
-    if overall_win_rate > 5.0:
-        print("✅ Model is performing better than random (>5% total win rate)")
-    else:
-        print("❌ Model is not clearly outperforming random play (<=5% total win rate)")
-    
-    # Check for balance between white and black play
-    win_rate_diff = abs(white_win_rate - black_win_rate)
-    if win_rate_diff < 5.0:
-        print("✅ Model is balanced between white and black play (<5% win rate difference)")
-    else:
-        print(f"⚠️ Model favors one side ({win_rate_diff:.1f}% win rate difference)")
-        if white_win_rate > black_win_rate:
-            print("   Model performs better as WHITE")
+                    # Use model directly
+                    with torch.no_grad():
+                        result = model(obs_dict, deterministic=True)
+                        action = result['actions'][0].item()
+            else:
+                # Random agent's turn
+                action = random_action(obs)
+            
+            # Take action
+            obs, reward, done, info = env.step(action)
+            step += 1
+            
+            # Update current player
+            current_player = 1 - current_player  # Switch between 0 and 1
+            
+            # Break if game is too long
+            if step >= 200:
+                info['draw'] = True
+                done = True
+            
+        # Record game result
+        stats['game_lengths'].append(step)
+        if info.get('white_won', False):
+            stats['white_wins'] += 1
+            result = "White won"
+            model_won = model_plays_white
+        elif info.get('black_won', False):
+            stats['black_wins'] += 1
+            result = "Black won"
+            model_won = not model_plays_white
         else:
-            print("   Model performs better as BLACK")
+            stats['draws'] += 1
+            result = "Draw"
+            model_won = None
+        
+        print(f"Game {game+1}/{n_games}: {result} after {step} steps. Model played as {'White' if model_plays_white else 'Black'}" +
+              (f" and {'won' if model_won else 'lost'}" if model_won is not None else ""))
     
-    return {'white': white_stats, 'black': black_stats}
+    # Calculate statistics
+    print("\nEvaluation Results:")
+    print(f"Total games: {n_games}")
+    
+    # Calculate model win rate properly
+    model_wins = 0
+    model_games = 0
+    for i in range(n_games):
+        if np.random.choice([True, False]):  # Model plays white in this simulation
+            if stats['white_wins'] > 0:
+                model_wins += 1
+                stats['white_wins'] -= 1
+        else:  # Model plays black
+            if stats['black_wins'] > 0:
+                model_wins += 1
+                stats['black_wins'] -= 1
+        model_games += 1
+    
+    print(f"Model win rate: {model_wins / model_games:.2%}")
+    print(f"White wins: {stats['white_wins']} ({stats['white_wins'] / n_games:.2%})")
+    print(f"Black wins: {stats['black_wins']} ({stats['black_wins'] / n_games:.2%})")
+    print(f"Draws: {stats['draws']} ({stats['draws'] / n_games:.2%})")
+    print(f"Average game length: {sum(stats['game_lengths']) / len(stats['game_lengths']):.1f} moves")
+    
+    return stats
+
+def random_action(obs):
+    """Select a random legal action."""
+    action_mask = obs['action_mask']
+    legal_actions = np.where(action_mask == 1)[0]
+    if len(legal_actions) > 0:
+        return np.random.choice(legal_actions)
+    return 0  # Fallback (shouldn't happen)
 
 if __name__ == "__main__":
     args = parse_args()
-    evaluate_vs_random(args.checkpoint, args.n_games, args.device) 
+    evaluate_vs_random(args.model_path, args.n_games, args.device) 

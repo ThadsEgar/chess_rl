@@ -1,74 +1,91 @@
 #!/bin/bash
+# Setup script for Lambda Labs A10 machine with chess_rl
 
-# Exit on any error
 set -e
 
-# Update package list and install essentials + OpenSpiel build dependencies
-echo "Updating package list and installing essentials..."
-sudo apt-get update
-sudo apt-get install -y git python3 python3-pip python3-dev cmake g++ \
-    libopenmpi-dev zlib1g-dev curl unzip
+echo "Setting up Lambda Labs environment for chess_rl..."
 
-# Create project directory structure
-echo "Creating project directory structure..."
-mkdir -p ~/code/thads_projects
-cd ~/code/thads_projects
-
-# Clone your Git repo (using HTTPS to avoid SSH key setup)
-echo "Cloning chess_rl repository..."
-if [ ! -d "chess_rl" ]; then
-    # Replace with your actual GitHub repository URL
-    git clone https://github.com/thadsegar/chess_rl.git
-else
-    echo "Repository already exists, pulling latest changes..."
+# Clone repository if it doesn't exist
+REPO_DIR="code/thads_projects/chess_rl"
+if [ ! -d "$HOME/$REPO_DIR" ]; then
+    echo "Cloning repository..."
+    mkdir -p $(dirname "$HOME/$REPO_DIR")
+    cd $(dirname "$HOME/$REPO_DIR")
+    git clone https://github.com/yourusername/chess_rl.git
     cd chess_rl
+else
+    echo "Repository already exists, updating..."
+    cd "$HOME/$REPO_DIR"
     git pull
-    cd ..
 fi
 
-cd chess_rl
+# Ensure we're in the repo directory
+cd "$HOME/$REPO_DIR"
 
-# Install Miniconda if not already installed
-if [ ! -d "$HOME/miniconda3" ]; then
-    echo "Installing Miniconda..."
-    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-    bash miniconda.sh -b -p $HOME/miniconda3
-    rm miniconda.sh
+# Create virtual environment if it doesn't exist
+if [ ! -d "$HOME/miniforge3" ]; then
+    echo "Installing Miniforge3..."
+    curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+    bash Miniforge3-$(uname)-$(uname -m).sh -b -p "$HOME/miniforge3"
+    rm Miniforge3-$(uname)-$(uname -m).sh
 fi
 
-# Add Miniconda to PATH
-export PATH="$HOME/miniconda3/bin:$PATH"
+# Initialize conda
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
 
-# Initialize conda for bash
-echo "Initializing conda..."
-$HOME/miniconda3/bin/conda init bash
-source ~/.bashrc
+# Create or update the environment
+if conda env list | grep -q "chess_rl"; then
+    echo "Updating chess_rl environment..."
+    conda env update -f environment.yml
+else
+    echo "Creating chess_rl environment..."
+    conda env create -f environment.yml
+fi
 
-# Create and activate Conda environment
-echo "Setting up Conda environment 'chess_rl'..."
-$HOME/miniconda3/bin/conda create -n chess_rl python=3.10 -y
-$HOME/miniconda3/bin/conda activate chess_rl || source $HOME/miniconda3/bin/activate chess_rl
+# Activate the environment
+conda activate chess_rl
 
 # Install Python dependencies
 echo "Installing Python dependencies..."
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install stable-baselines3 gymnasium numpy matplotlib chess
+pip install -r requirements.txt
 
-# Install OpenSpiel using pip
-echo "Installing OpenSpiel using pip..."
-python3 -m pip install open_spiel
+# Install PySpiel for chess environment
+if ! python -c "import pyspiel" &> /dev/null; then
+    echo "Installing PySpiel..."
+    pip install open_spiel
+fi
 
-# Create necessary directories
-mkdir -p data/logs
+# Setup CUDA paths
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/
+
+# Test imports
+echo "Testing imports..."
+python -c "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('CUDA device count:', torch.cuda.device_count())"
+python -c "import ray; print('Ray version:', ray.__version__)"
+python -c "import pyspiel; print('PySpiel installed successfully')"
+python -c "import numpy; print('NumPy version:', numpy.__version__)"
+python -c "import chess; print('Python-chess version:', chess.__version__)"
+
+# Create data directory structure if it doesn't exist
 mkdir -p data/models
+mkdir -p checkpoints
+mkdir -p self_play_data
 
-# Verify setup
-echo "Verifying setup..."
-python -c "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
-python -c "import stable_baselines3; print('Stable-Baselines3 version:', stable_baselines3.__version__)"
-python -c "try: import pyspiel; print('OpenSpiel (pyspiel) installed successfully'); except ImportError: print('OpenSpiel installation failed')"
+echo ""
+echo "Setup complete! Your Lambda Labs environment is ready for chess_rl."
+echo ""
+echo "To start using it:"
+echo "  1. Run 'conda activate chess_rl'"
+echo "  2. Navigate to $REPO_DIR"
+echo "  3. Run 'python -m src.run_ray_a3c --mode train' to start training"
+echo ""
+echo "GPU Information:"
+nvidia-smi
 
-echo "Setup complete! To start working:"
-echo "1. Run 'source ~/.bashrc'"
-echo "2. Run 'conda activate chess_rl'"
-echo "3. Run 'python -m src.train'" 
+echo ""
+echo "Creating helpful aliases..."
+echo "alias chess_train='cd $HOME/$REPO_DIR && conda activate chess_rl && python -m src.run_ray_a3c --mode train'" >> ~/.bashrc
+echo "alias chess_eval='cd $HOME/$REPO_DIR && conda activate chess_rl && python -m src.run_ray_a3c --mode evaluate'" >> ~/.bashrc
+echo "alias chess_test='cd $HOME/$REPO_DIR && conda activate chess_rl && python -m src.test_model'" >> ~/.bashrc
+
+echo "Done! Restart your shell or run 'source ~/.bashrc' to enable the aliases." 
