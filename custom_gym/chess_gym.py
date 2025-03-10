@@ -246,7 +246,12 @@ class ChessEnv(gym.Env):
         # If terminal state, use the game result reward (much larger)
         if done:
             # Terminal rewards are much more significant
-            reward = reward * 10.0  # Amplify terminal rewards
+            result = get_game_result(self.state)
+            if result['white_won'] or result['black_won']:
+                reward = reward * 20.0  # Amplify win/loss rewards even more
+            elif result['draw']:
+                # Slightly penalize draws to encourage decisive play
+                reward = -0.1
         else:
             # During the game, use small intermediate rewards
             reward = intermediate_reward

@@ -291,8 +291,8 @@ def parse_arguments():
                         help='Clipping parameter for PPO (default: 0.1 for more conservative updates)')
     parser.add_argument('--max_grad_norm', type=float, default=0.3,
                         help='Maximum norm for gradients (default: 0.3 for more stable updates)')
-    parser.add_argument('--target_kl', type=float, default=0.015,
-                        help='Target KL divergence threshold for early stopping (default: 0.015)')
+    parser.add_argument('--target_kl', type=float, default=0.03,
+                        help='Target KL divergence threshold for early stopping (default: 0.03)')
     return parser.parse_args()
 
 def main():
