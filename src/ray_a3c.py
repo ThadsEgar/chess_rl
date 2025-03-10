@@ -565,15 +565,6 @@ class RolloutWorker:
                     logger.error(f"Worker {self.worker_id}: Unexpected step result type: {type(step_result)}")
                     next_obs, reward, done, info = {}, 0, True, {}
                 
-                # Log step results for debugging
-                if self.episode_length == 0:
-                    logger.info(f"Worker {self.worker_id}: Step result type: {type(step_result)}")
-                    if isinstance(step_result, tuple):
-                        logger.info(f"Worker {self.worker_id}: Step result has {len(step_result)} elements")
-                        logger.info(f"Worker {self.worker_id}: Observation type: {type(next_obs)}")
-                        if isinstance(next_obs, dict):
-                            logger.info(f"Worker {self.worker_id}: Observation keys: {next_obs.keys()}")
-                
                 # Save transition
                 self.buffer['actions'].append(action)
                 self.buffer['values'].append(value)
@@ -1211,9 +1202,8 @@ def train(args):
                 # Apply gradients to parameter server
                 ray.get(param_server.apply_gradients.remote(gradients, metrics))
             
-            # Update all workers with latest weights
+            # Launch weight updates asynchronously but don't wait for them
             update_tasks = [worker.update_weights.remote() for worker in workers]
-            ray.get(update_tasks)
             
             # Save checkpoint periodically
             iteration += 1
