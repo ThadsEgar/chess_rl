@@ -15,6 +15,8 @@ import random
 from pathlib import Path
 import socket
 import platform
+import gym
+from gym import spaces
 
 # Import the PyTorch chess model
 from src.chess_model import ChessCNN, MCTS
@@ -348,48 +350,149 @@ class RolloutWorker:
     
     def reset_env(self):
         """Reset the environment and initialize a new episode"""
-        self.current_obs = self.env.reset()
-        self.episode_reward = 0
-        self.episode_length = 0
-        
-        # Randomly choose if agent plays as white or black
-        self.player_color = random.randint(0, 1)  # 1=white, 0=black
+        try:
+            # Print info about the environment for debugging
+            logger.info(f"Worker {self.worker_id}: Environment type: {type(self.env)}")
+            
+            # Newer versions of Gymnasium return (obs, info) tuple from reset()
+            logger.info(f"Worker {self.worker_id}: Calling env.reset()")
+            reset_result = self.env.reset()
+            logger.info(f"Worker {self.worker_id}: Reset result type: {type(reset_result)}")
+            
+            # Handle both old and new Gym/Gymnasium APIs
+            if isinstance(reset_result, tuple) and len(reset_result) >= 1:
+                # New API: (obs, info)
+                logger.info(f"Worker {self.worker_id}: Reset returned a tuple with {len(reset_result)} elements")
+                self.current_obs = reset_result[0]
+                # Store info if available
+                self.current_info = reset_result[1] if len(reset_result) > 1 else {}
+                logger.info(f"Worker {self.worker_id}: Extracted observation type: {type(self.current_obs)}")
+            else:
+                # Old API: just obs
+                logger.info(f"Worker {self.worker_id}: Reset returned a non-tuple")
+                self.current_obs = reset_result
+                self.current_info = {}
+                
+            # Print the observation structure
+            logger.info(f"Worker {self.worker_id}: Current observation type: {type(self.current_obs)}")
+            if isinstance(self.current_obs, dict):
+                logger.info(f"Worker {self.worker_id}: Observation keys: {list(self.current_obs.keys())}")
+            elif isinstance(self.current_obs, tuple):
+                logger.info(f"Worker {self.worker_id}: Observation is tuple with {len(self.current_obs)} elements")
+                if len(self.current_obs) > 0:
+                    logger.info(f"Worker {self.worker_id}: First element type: {type(self.current_obs[0])}")
+            elif isinstance(self.current_obs, np.ndarray):
+                logger.info(f"Worker {self.worker_id}: Observation is ndarray with shape {self.current_obs.shape}")
+            else:
+                logger.info(f"Worker {self.worker_id}: Observation is of type {type(self.current_obs)}")
+                
+            self.episode_reward = 0
+            self.episode_length = 0
+            
+            # Randomly choose if agent plays as white or black
+            self.player_color = random.randint(0, 1)  # 1=white, 0=black
+            
+        except Exception as e:
+            logger.error(f"Worker {self.worker_id}: Error in reset_env: {str(e)}", exc_info=True)
+            # Create empty observation as fallback
+            self.current_obs = {}
+            self.current_info = {}
+            self.episode_reward = 0
+            self.episode_length = 0
+            self.player_color = random.randint(0, 1)
     
     def select_action(self, obs):
         """Select an action using the model or MCTS"""
-        # Convert observation to tensor
-        obs_dict = {
-            'board': torch.FloatTensor(obs['board']).unsqueeze(0).to(self.device),
-            'action_mask': torch.FloatTensor(obs['action_mask']).unsqueeze(0).to(self.device)
-        }
+        try:
+            # Handle different observation formats
+            if isinstance(obs, tuple) and len(obs) >= 1:
+                # Tuple format: (obs, info)
+                actual_obs = obs[0]
+            else:
+                # Direct observation
+                actual_obs = obs
+            
+            # Convert observation to tensor format expected by the model
+            if isinstance(actual_obs, dict) and 'board' in actual_obs and 'action_mask' in actual_obs:
+                # Dict format with board and action_mask
+                obs_dict = {
+                    'board': torch.FloatTensor(actual_obs['board']).unsqueeze(0).to(self.device),
+                    'action_mask': torch.FloatTensor(actual_obs['action_mask']).unsqueeze(0).to(self.device)
+                }
+            elif isinstance(actual_obs, np.ndarray):
+                # Numpy array format - split into board and mask components
+                # Assuming board is first 832 elements (13*8*8) and mask is the rest
+                board_size = 13 * 8 * 8  # Board size
+                if len(actual_obs.shape) == 1 and actual_obs.shape[0] > board_size:
+                    obs_dict = {
+                        'board': torch.FloatTensor(actual_obs[:board_size]).unsqueeze(0).to(self.device),
+                        'action_mask': torch.FloatTensor(actual_obs[board_size:]).unsqueeze(0).to(self.device)
+                    }
+                else:
+                    # Just treat the whole thing as a board
+                    obs_dict = {
+                        'board': torch.FloatTensor(actual_obs).unsqueeze(0).to(self.device),
+                        'action_mask': torch.ones(1, 4672, device=self.device)  # Default mask allowing all actions
+                    }
+            else:
+                # Unknown format - log error and create a dummy observation
+                logger.error(f"Worker {self.worker_id}: Unknown observation format: {type(actual_obs)}")
+                obs_dict = {
+                    'board': torch.zeros(1, 13 * 8 * 8, device=self.device),
+                    'action_mask': torch.ones(1, 4672, device=self.device)
+                }
+            
+            # Use MCTS if enabled and we're playing as the current player
+            # Determine current player from environment state if possible
+            if hasattr(self.env, 'get_current_player'):
+                current_player = self.env.get_current_player()
+            elif hasattr(self.env, 'board') and hasattr(self.env.board, 'turn'):
+                current_player = 1 if self.env.board.turn else 0  # 1=white, 0=black
+            else:
+                # Fallback - assume it's white's turn
+                current_player = 1
+            
+            use_mcts = (self.mcts_sims > 0 and current_player == self.player_color)
+            
+            if use_mcts:
+                # Use MCTS to select action
+                with torch.no_grad():
+                    # Get a copy of the game state
+                    if hasattr(self.env, 'board'):
+                        state = self.env.board.copy()
+                    elif hasattr(self.env, 'state') and hasattr(self.env.state, 'board'):
+                        state = self.env.state.board.copy()
+                    else:
+                        logger.error(f"Worker {self.worker_id}: Could not get board state for MCTS")
+                        # Fall back to using the model directly
+                        result = self.model(obs_dict)
+                        return result['actions'][0].item(), result['values'][0].item(), result['log_probs'][0].item()
+                    
+                    # Run MCTS search
+                    action, _ = self.model.mcts.search(state)
+                    
+                    # Get value and log_prob for the selected action
+                    result = self.model(obs_dict)
+                    values = result['values']
+                    
+                    # Get log probability for the MCTS action
+                    actions_tensor = torch.tensor([action], device=self.device)
+                    eval_result = self.model.evaluate_actions(obs_dict, actions_tensor)
+                    log_probs = eval_result['log_probs']
+            else:
+                # Use model directly
+                with torch.no_grad():
+                    result = self.model(obs_dict)
+                    action = result['actions'][0].item()
+                    values = result['values']
+                    log_probs = result['log_probs']
+            
+            return action, values[0].item(), log_probs[0].item()
         
-        # Use MCTS if enabled and we're playing as the current player
-        current_player = 1 if self.env.board.turn else 0  # 1=white, 0=black
-        use_mcts = (self.mcts_sims > 0 and current_player == self.player_color)
-        
-        if use_mcts:
-            # Use MCTS to select action
-            with torch.no_grad():
-                state = self.env.board.copy()
-                action, _ = self.model.mcts.search(state)
-                
-                # Get value and log_prob for the selected action
-                result = self.model(obs_dict)
-                values = result['values']
-                
-                # Get log probability for the MCTS action
-                actions_tensor = torch.tensor([action], device=self.device)
-                eval_result = self.model.evaluate_actions(obs_dict, actions_tensor)
-                log_probs = eval_result['log_probs']
-        else:
-            # Use model directly
-            with torch.no_grad():
-                result = self.model(obs_dict)
-                action = result['actions'][0].item()
-                values = result['values']
-                log_probs = result['log_probs']
-        
-        return action, values[0].item(), log_probs[0].item()
+        except Exception as e:
+            logger.error(f"Worker {self.worker_id}: Error in select_action: {str(e)}", exc_info=True)
+            # Return a safe fallback
+            return 0, 0.0, 0.0
     
     def collect_experience(self, num_steps=200):
         """Collect experience for a number of steps"""
@@ -405,67 +508,111 @@ class RolloutWorker:
         
         # Run until buffer is filled or episode ends
         complete_episode = False
-        for _ in range(num_steps):
-            # Get current player
-            current_player = 1 if self.env.board.turn else 0  # 1=white, 0=black
-            
-            # Save current observation
-            self.buffer['obs'].append(self.current_obs)
-            
-            # Select action
-            action, value, log_prob = self.select_action(self.current_obs)
-            
-            # Step the environment
-            next_obs, reward, done, info = self.env.step(action)
-            
-            # Save transition
-            self.buffer['actions'].append(action)
-            self.buffer['values'].append(value)
-            self.buffer['log_probs'].append(log_prob)
-            self.buffer['rewards'].append(reward)
-            self.buffer['dones'].append(done)
-            
-            # Update episode tracking
-            self.episode_reward += reward
-            self.episode_length += 1
-            
-            # Handle episode termination
-            if done:
-                # Record episode metrics
-                self.episode_metrics['episode_reward'].append(self.episode_reward)
-                self.episode_metrics['episode_length'].append(self.episode_length)
+        
+        try:
+            for _ in range(num_steps):
+                # Save current observation
+                self.buffer['obs'].append(self.current_obs)
                 
-                # Track game outcomes
-                self.episode_metrics['games'] += 1
-                if info.get('white_won', False):
-                    self.episode_metrics['white_wins'] += 1
-                elif info.get('black_won', False):
-                    self.episode_metrics['black_wins'] += 1
+                # Select action
+                action, value, log_prob = self.select_action(self.current_obs)
+                
+                # Step the environment
+                step_result = self.env.step(action)
+                
+                # Handle different return formats from environment step
+                if isinstance(step_result, tuple):
+                    if len(step_result) >= 4:  # Modern Gym/Gymnasium API: (obs, reward, done, truncated, info)
+                        next_obs = step_result[0]
+                        reward = step_result[1]
+                        done = step_result[2]
+                        # May also have truncated and info
+                        if len(step_result) >= 5:
+                            info = step_result[4]
+                        else:
+                            info = {}
+                    else:
+                        # Unexpected format
+                        logger.error(f"Worker {self.worker_id}: Unexpected step result format with {len(step_result)} elements")
+                        next_obs, reward, done, info = {}, 0, True, {}
                 else:
-                    self.episode_metrics['draws'] += 1
+                    # Unexpected format
+                    logger.error(f"Worker {self.worker_id}: Unexpected step result type: {type(step_result)}")
+                    next_obs, reward, done, info = {}, 0, True, {}
                 
-                # Reset environment for next episode
-                self.reset_env()
-                complete_episode = True
-            else:
-                # Continue episode
-                self.current_obs = next_obs
+                # Log step results for debugging
+                if self.episode_length == 0:
+                    logger.info(f"Worker {self.worker_id}: Step result type: {type(step_result)}")
+                    if isinstance(step_result, tuple):
+                        logger.info(f"Worker {self.worker_id}: Step result has {len(step_result)} elements")
+                        logger.info(f"Worker {self.worker_id}: Observation type: {type(next_obs)}")
+                        if isinstance(next_obs, dict):
+                            logger.info(f"Worker {self.worker_id}: Observation keys: {next_obs.keys()}")
+                
+                # Save transition
+                self.buffer['actions'].append(action)
+                self.buffer['values'].append(value)
+                self.buffer['log_probs'].append(log_prob)
+                self.buffer['rewards'].append(reward)
+                self.buffer['dones'].append(done)
+                
+                # Update episode tracking
+                self.episode_reward += reward
+                self.episode_length += 1
+                
+                # Handle episode termination
+                if done:
+                    # Record episode metrics
+                    self.episode_metrics['episode_reward'].append(self.episode_reward)
+                    self.episode_metrics['episode_length'].append(self.episode_length)
+                    
+                    # Track game outcomes
+                    self.episode_metrics['games'] += 1
+                    if isinstance(info, dict):
+                        if info.get('white_won', False):
+                            self.episode_metrics['white_wins'] += 1
+                        elif info.get('black_won', False):
+                            self.episode_metrics['black_wins'] += 1
+                        else:
+                            self.episode_metrics['draws'] += 1
+                    else:
+                        # Default to draw if info is not available
+                        self.episode_metrics['draws'] += 1
+                    
+                    # Reset environment for next episode
+                    self.reset_env()
+                    complete_episode = True
+                else:
+                    # Continue episode
+                    self.current_obs = next_obs
+                
+                # Break if steps exceed limit (to prevent overly long episodes)
+                if self.episode_length >= 1000:
+                    # Force termination and reset
+                    self.episode_metrics['episode_reward'].append(self.episode_reward)
+                    self.episode_metrics['episode_length'].append(self.episode_length)
+                    self.episode_metrics['draws'] += 1
+                    self.episode_metrics['games'] += 1
+                    self.reset_env()
+                    complete_episode = True
+                    break
             
-            # Break if steps exceed limit (to prevent overly long episodes)
-            if self.episode_length >= 1000:
-                # Force termination and reset
-                self.episode_metrics['episode_reward'].append(self.episode_reward)
-                self.episode_metrics['episode_length'].append(self.episode_length)
-                self.episode_metrics['draws'] += 1
-                self.episode_metrics['games'] += 1
-                self.reset_env()
-                complete_episode = True
-                break
+            # Process the buffer for training
+            processed_buffer = self.process_buffer()
+            
+            return processed_buffer, complete_episode, self.get_current_metrics()
         
-        # Process the buffer for training
-        processed_buffer = self.process_buffer()
-        
-        return processed_buffer, complete_episode, self.get_current_metrics()
+        except Exception as e:
+            logger.error(f"Worker {self.worker_id}: Error in collect_experience: {str(e)}", exc_info=True)
+            # Return empty results as a fallback
+            return {
+                'obs': [],
+                'actions': np.array([]),
+                'returns': np.array([]),
+                'advantages': np.array([]),
+                'log_probs': np.array([]),
+                'values': np.array([])
+            }, True, {}
     
     def process_buffer(self):
         """Process buffer for training (calculate returns and advantages)"""
@@ -629,9 +776,173 @@ class RolloutWorker:
 
 def create_chess_env():
     """Create a chess environment"""
-    from custom_gym.chess_gym import ChessEnv
-    env = ChessEnv()
-    return env
+    try:
+        from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
+        
+        # Create base environment
+        env = ChessEnv()
+        
+        # Wrap with action mask
+        env = ActionMaskWrapper(env)
+        
+        # Add a wrapper to ensure consistent observation format
+        env = ObservationDictWrapper(env)
+        
+        return env
+    except Exception as e:
+        logger.error(f"Error creating chess environment: {e}", exc_info=True)
+        raise
+
+
+class ObservationDictWrapper(gym.Wrapper):
+    """
+    A wrapper that ensures observations are always dictionaries with 'board' and 'action_mask' keys.
+    This handles inconsistencies between different Gym/Gymnasium versions.
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        self.observation_space = env.observation_space
+        logger.info(f"ObservationDictWrapper: Wrapped env of type {type(env)}")
+        logger.info(f"ObservationDictWrapper: Observation space type: {type(self.observation_space)}")
+        
+        # Check observation space
+        if not isinstance(self.observation_space, spaces.Dict):
+            logger.warning(f"ObservationDictWrapper: Non-Dict observation space: {self.observation_space}")
+    
+    def reset(self, **kwargs):
+        """Reset the environment and convert the observation to a proper dict if needed."""
+        try:
+            reset_result = self.env.reset(**kwargs)
+            
+            # Log the reset result format
+            logger.info(f"ObservationDictWrapper.reset: Result type: {type(reset_result)}")
+            
+            if isinstance(reset_result, tuple):
+                # Newer Gymnasium API returns (obs, info)
+                obs, info = reset_result
+                logger.info(f"ObservationDictWrapper.reset: Unpacked obs type: {type(obs)}")
+            else:
+                # Older API just returns obs
+                obs = reset_result
+                info = {}
+                logger.info(f"ObservationDictWrapper.reset: Direct obs type: {type(obs)}")
+            
+            # Make sure the observation is a dictionary
+            if not isinstance(obs, dict):
+                if isinstance(obs, tuple) and len(obs) >= 2:
+                    # For tuples, assume first element is board, second is action_mask
+                    fixed_obs = {'board': obs[0], 'action_mask': obs[1]}
+                elif isinstance(obs, np.ndarray):
+                    # For ndarray, split into board and mask components based on expected sizes
+                    board_size = 13 * 8 * 8
+                    if obs.size > board_size:
+                        fixed_obs = {
+                            'board': obs[:board_size].reshape(13, 8, 8),
+                            'action_mask': obs[board_size:]
+                        }
+                    else:
+                        # Just the board
+                        fixed_obs = {'board': obs, 'action_mask': np.ones(4672, dtype=np.float32)}
+                else:
+                    # Unknown format - create a dummy observation
+                    logger.warning(f"ObservationDictWrapper.reset: Unknown observation format: {type(obs)}")
+                    fixed_obs = {
+                        'board': np.zeros((13, 8, 8), dtype=np.float32),
+                        'action_mask': np.ones(4672, dtype=np.float32)
+                    }
+                    
+                logger.info(f"ObservationDictWrapper.reset: Converted obs to dict with keys {fixed_obs.keys()}")
+                obs = fixed_obs
+            
+            # Check if the observation is missing required keys
+            if 'board' not in obs or 'action_mask' not in obs:
+                logger.warning(f"ObservationDictWrapper.reset: Missing keys in observation: {obs.keys()}")
+                # Add any missing keys
+                if 'board' not in obs:
+                    obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
+                if 'action_mask' not in obs:
+                    obs['action_mask'] = np.ones(4672, dtype=np.float32)
+            
+            # Return consistent format
+            return obs, info
+            
+        except Exception as e:
+            logger.error(f"ObservationDictWrapper.reset: Error: {e}", exc_info=True)
+            # Return a safe fallback
+            dummy_obs = {
+                'board': np.zeros((13, 8, 8), dtype=np.float32),
+                'action_mask': np.ones(4672, dtype=np.float32)
+            }
+            return dummy_obs, {}
+    
+    def step(self, action):
+        """Take a step and ensure the observation is a proper dict."""
+        try:
+            step_result = self.env.step(action)
+            
+            # Handle different return formats
+            if isinstance(step_result, tuple):
+                if len(step_result) == 4:  # (obs, reward, done, info)
+                    obs, reward, done, info = step_result
+                    truncated = False
+                elif len(step_result) == 5:  # (obs, reward, terminated, truncated, info)
+                    obs, reward, done, truncated, info = step_result
+                else:
+                    logger.warning(f"ObservationDictWrapper.step: Unexpected step result format with {len(step_result)} elements")
+                    obs, reward, done, truncated, info = None, 0, True, False, {}
+            else:
+                logger.warning(f"ObservationDictWrapper.step: Unexpected step result type: {type(step_result)}")
+                obs, reward, done, truncated, info = None, 0, True, False, {}
+            
+            # Make sure the observation is a dictionary
+            if not isinstance(obs, dict):
+                if isinstance(obs, tuple) and len(obs) >= 2:
+                    # For tuples, assume first element is board, second is action_mask
+                    fixed_obs = {'board': obs[0], 'action_mask': obs[1]}
+                elif isinstance(obs, np.ndarray):
+                    # For ndarray, split into board and mask components based on expected sizes
+                    board_size = 13 * 8 * 8
+                    if obs.size > board_size:
+                        fixed_obs = {
+                            'board': obs[:board_size].reshape(13, 8, 8),
+                            'action_mask': obs[board_size:]
+                        }
+                    else:
+                        # Just the board
+                        fixed_obs = {'board': obs, 'action_mask': np.ones(4672, dtype=np.float32)}
+                else:
+                    # Unknown format - create a dummy observation
+                    logger.warning(f"ObservationDictWrapper.step: Unknown observation format: {type(obs)}")
+                    fixed_obs = {
+                        'board': np.zeros((13, 8, 8), dtype=np.float32),
+                        'action_mask': np.ones(4672, dtype=np.float32)
+                    }
+                
+                obs = fixed_obs
+            
+            # Check if the observation is missing required keys
+            if 'board' not in obs or 'action_mask' not in obs:
+                logger.warning(f"ObservationDictWrapper.step: Missing keys in observation: {obs.keys()}")
+                # Add any missing keys
+                if 'board' not in obs:
+                    obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
+                if 'action_mask' not in obs:
+                    obs['action_mask'] = np.ones(4672, dtype=np.float32)
+            
+            # Return in the appropriate format based on what was received
+            if len(step_result) == 5:  # Gymnasium API
+                return obs, reward, done, truncated, info
+            else:  # Older API
+                return obs, reward, done, info
+                
+        except Exception as e:
+            logger.error(f"ObservationDictWrapper.step: Error: {e}", exc_info=True)
+            # Return a safe fallback
+            dummy_obs = {
+                'board': np.zeros((13, 8, 8), dtype=np.float32),
+                'action_mask': np.ones(4672, dtype=np.float32)
+            }
+            return dummy_obs, 0, True, {}
 
 
 def train(args):

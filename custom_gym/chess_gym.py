@@ -258,7 +258,8 @@ class ChessEnv(gym.Env):
         self.reward = 0
         self.move_count = 0
         
-        return self._get_obs(), {}
+        # Return observation and info dict (new Gymnasium API)
+        return self._get_obs(), {"current_player": 1 if self.board.turn else 0}
     
     def step(self, action):
         """
@@ -325,6 +326,7 @@ class ChessEnv(gym.Env):
             info["move_count"] = self.move_count
             info["current_player"] = 1 if self.board.turn else 0
             
+            # Follow new Gymnasium API: observation, reward, terminated, info
             return self._get_obs(), reward, self.done, info
             
         except Exception as e:
@@ -390,13 +392,32 @@ class ActionMaskWrapper(gym.Wrapper):
     
     def reset(self, **kwargs):
         """Reset the environment and add action mask to observation."""
-        obs, info = self.env.reset(**kwargs)
-        return obs, info
+        # Handle both old and new Gym APIs
+        reset_result = self.env.reset(**kwargs)
+        
+        if isinstance(reset_result, tuple) and len(reset_result) >= 1:
+            # New API: (obs, info)
+            obs, info = reset_result
+            return obs, info
+        else:
+            # Old API: just obs
+            return reset_result
     
     def step(self, action):
         """Take a step and add action mask to the new observation."""
-        obs, reward, done, info = self.env.step(action)
-        return obs, reward, done, info
+        # Handle both old and new Gym APIs
+        step_result = self.env.step(action)
+        
+        if isinstance(step_result, tuple):
+            if len(step_result) == 4:  # obs, reward, done, info
+                obs, reward, done, info = step_result
+                return obs, reward, done, info
+            elif len(step_result) == 5:  # obs, reward, terminated, truncated, info (newest Gymnasium API)
+                obs, reward, terminated, truncated, info = step_result
+                return obs, reward, terminated, truncated, info
+        
+        # Default fallback - just return whatever the environment returned
+        return step_result
 
 def make_env(rank, seed=0, simple_test=False, white_advantage=None):
     """
