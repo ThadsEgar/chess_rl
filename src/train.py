@@ -297,6 +297,8 @@ def parse_arguments():
                         help='Run balanced training to ensure both white and black learn equally')
     parser.add_argument('--mcts_sims', type=int, default=100,
                         help='Number of MCTS simulations during training (default: 100)')
+    parser.add_argument('--mcts_eval_only', action='store_true',
+                        help='Use MCTS only during evaluation, not during training')
     return parser.parse_args()
 
 def main():
@@ -394,7 +396,8 @@ def main():
         batch_size=args.batch_size,
         clip_range=args.clip_range,
         max_grad_norm=args.max_grad_norm,
-        mcts_sims=args.mcts_sims
+        mcts_sims=args.mcts_sims,
+        mcts_eval_only=args.mcts_eval_only
     )
     
     # Set up callbacks

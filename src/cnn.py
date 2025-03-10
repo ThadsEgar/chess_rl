@@ -201,47 +201,55 @@ class Node:
     def expand(self, policy_net):
         from custom_gym.chess_gym import canonical_encode_board_for_cnn
         
-        # Get board representation
-        board_obs = canonical_encode_board_for_cnn(self.state)
-        board_obs_flat = board_obs.flatten()
-        
-        # Get legal actions
-        legal_actions = self.state.legal_actions()
-        
-        # Create action mask
-        mask = np.zeros(4672, dtype=np.float32)
-        mask[legal_actions] = 1.0
-        
-        # Combine for full observation
-        obs = np.concatenate([board_obs_flat, mask])
-        
-        # Get policy evaluation
-        with torch.no_grad():
-            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(policy_net.device)
-            actions, values, _ = policy_net(obs_tensor, deterministic=False)
+        try:
+            # Get board representation
+            board_obs = canonical_encode_board_for_cnn(self.state)
+            board_obs_flat = board_obs.flatten()
             
-            # Get probabilities
-            action_mask = obs_tensor[:, policy_net.board_flat_size:]
-            features = policy_net.extract_features(obs_tensor)
-            latent_pi, _ = policy_net.mlp_extractor(features)
-            logits = policy_net.action_net(latent_pi)
-            illegal_mask = (action_mask < 0.5)
-            logits = logits.masked_fill(illegal_mask, -1e8)
-            probs = F.softmax(logits, dim=-1).squeeze(0)
-        
-        # Create child nodes
-        for action in legal_actions:
-            if action not in self.children:
-                next_state = self.state.clone()
-                next_state.apply_action(action)
-                self.children[action] = Node(
-                    state=next_state,
-                    prior=probs[action].item(),
-                    parent=self,
-                    root_player=self.root_player
-                )
-        
-        return values.item()
+            # Get legal actions
+            legal_actions = self.state.legal_actions()
+            
+            # Create action mask (fixed size for chess: 4672)
+            mask = np.zeros(4672, dtype=np.float32)
+            mask[legal_actions] = 1.0
+            
+            # Combine for full observation
+            obs = np.concatenate([board_obs_flat, mask])
+            
+            # Get policy evaluation
+            with torch.no_grad():
+                obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(policy_net.device)
+                # Create Dict observation for policy
+                obs_dict = {
+                    'board': obs_tensor[:, :832],  # First 832 elements are the board representation
+                    'action_mask': obs_tensor[:, 832:]  # Rest is the action mask
+                }
+                
+                # Get action distribution and value
+                actions, values, _ = policy_net(obs_dict, deterministic=False)
+                
+                # Calculate probabilities for each action
+                logits = policy_net.policy_net(policy_net.extract_features(obs_dict))
+                illegal_actions_mask = (obs_dict['action_mask'] < 0.5)
+                logits = logits.masked_fill(illegal_actions_mask, -1e8)
+                probs = F.softmax(logits, dim=-1).squeeze(0)
+                
+                # For legal actions, create child nodes
+                for action in legal_actions:
+                    if action not in self.children:
+                        next_state = self.state.clone()
+                        next_state.apply_action(action)
+                        self.children[action] = Node(
+                            state=next_state,
+                            prior=probs[action].item(),
+                            parent=self,
+                            root_player=self.root_player
+                        )
+                
+                return values.item()
+        except Exception as e:
+            print(f"Error in Node.expand: {str(e)}")
+            return 0.0
 
     def backpropagate(self, value):
         self.visit_count += 1
@@ -259,141 +267,151 @@ class MCTS:
         self.device = getattr(policy_net, 'device', 'cpu')
         
     def search(self, state):
-        root = Node(state)
-        
-        # Batch size for parallel evaluations
-        batch_size = 8  # Can be increased based on GPU memory
-        
-        for sim_batch in range(0, self.num_simulations, batch_size):
-            # Actual batch size for this iteration
-            current_batch_size = min(batch_size, self.num_simulations - sim_batch)
+        try:
+            root = Node(state)
             
-            # Selection and expansion phases - prepare batch
-            leaf_nodes = []
-            for _ in range(current_batch_size):
-                node = root
-                search_path = [node]
-                
-                # Selection phase - find leaf node
-                while not node.is_terminal and node.children:
-                    action, node = node.select_child(self.c_puct)
-                    search_path.append(node)
-                
-                # If leaf node is not terminal and not expanded, add to batch
-                if not node.is_terminal and not node.children:
-                    leaf_nodes.append((node, search_path))
+            # Batch size for parallel evaluations
+            batch_size = 8  # Can be increased based on GPU memory
             
-            # Skip if no leaf nodes to evaluate
-            if not leaf_nodes:
-                continue
+            for sim_batch in range(0, self.num_simulations, batch_size):
+                # Actual batch size for this iteration
+                current_batch_size = min(batch_size, self.num_simulations - sim_batch)
                 
-            # Prepare batch for network evaluation
-            batch_obs = []
-            for node, _ in leaf_nodes:
-                try:
-                    from custom_gym.chess_gym import canonical_encode_board_for_cnn
-                    board_obs = canonical_encode_board_for_cnn(node.state)
-                    board_obs_flat = board_obs.flatten()
-                    legal_actions = node.state.legal_actions()
-                    mask = np.zeros(node.state.num_actions(), dtype=np.float32)
-                    mask[legal_actions] = 1.0
-                    obs = np.concatenate([board_obs_flat, mask])
-                    batch_obs.append(obs)
-                except Exception as e:
-                    print(f"Error preparing observation: {e}")
+                # Selection and expansion phases - prepare batch
+                leaf_nodes = []
+                for _ in range(current_batch_size):
+                    node = root
+                    search_path = [node]
+                    
+                    # Selection phase - find leaf node
+                    while not node.is_terminal and node.children:
+                        action, node = node.select_child(self.c_puct)
+                        search_path.append(node)
+                    
+                    # If leaf node is not terminal and not expanded, add to batch
+                    if not node.is_terminal and not node.children:
+                        leaf_nodes.append((node, search_path))
+                
+                # Skip if no leaf nodes to evaluate
+                if not leaf_nodes:
                     continue
-            
-            if not batch_obs:
-                continue
                 
-            # Convert to tensor and evaluate batch
+                # Prepare batch for network evaluation
+                batch_obs = []
+                for node, _ in leaf_nodes:
+                    try:
+                        from custom_gym.chess_gym import canonical_encode_board_for_cnn
+                        board_obs = canonical_encode_board_for_cnn(node.state)
+                        board_obs_flat = board_obs.flatten()
+                        legal_actions = node.state.legal_actions()
+                        # Fixed size for chess action space instead of calling num_actions
+                        mask = np.zeros(4672, dtype=np.float32)
+                        mask[legal_actions] = 1.0
+                        obs = np.concatenate([board_obs_flat, mask])
+                        batch_obs.append(obs)
+                    except Exception as e:
+                        print(f"Error preparing observation: {e}")
+                        continue
+                
+                if not batch_obs:
+                    continue
+                
+                # Convert to tensor and evaluate batch
+                try:
+                    with torch.no_grad():
+                        batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
+                        batch_board = batch_tensor[:, :832]  # Board representation is first 832 elements
+                        batch_mask = batch_tensor[:, 832:]  # Action mask is the rest
+                        
+                        # Create batch of dict observations
+                        batch_dict_obs = {
+                            'board': batch_board,
+                            'action_mask': batch_mask
+                        }
+                        
+                        # Get values from policy network
+                        _, batch_values, _ = self.policy_net(batch_dict_obs)
+                        batch_values = batch_values.cpu().detach()
+                        
+                        # Get probabilities for expansion
+                        logits = self.policy_net.policy_net(self.policy_net.extract_features(batch_dict_obs))
+                        illegal_actions_mask = (batch_dict_obs['action_mask'] < 0.5)
+                        logits = logits.masked_fill(illegal_actions_mask, -1e8)
+                        batch_probs = F.softmax(logits, dim=-1).cpu().detach()
+                except Exception as e:
+                    print(f"Error in batch evaluation: {e}")
+                    continue
+                
+                # Expansion and backpropagation for each leaf node
+                for i, (node, search_path) in enumerate(leaf_nodes):
+                    if i >= len(batch_values):  # Safety check
+                        continue
+                        
+                    value = batch_values[i]
+                    probs = batch_probs[i] if i < len(batch_probs) else None
+                    
+                    # Expand node with evaluated probabilities
+                    try:
+                        legal_actions = node.state.legal_actions()
+                        for action in legal_actions:
+                            if action not in node.children and probs is not None:
+                                next_state = node.state.clone()
+                                next_state.apply_action(action)
+                                node.children[action] = Node(
+                                    state=next_state,
+                                    prior=probs[action].item(),
+                                    parent=node,
+                                    root_player=node.root_player
+                                )
+                    except Exception as e:
+                        print(f"Error expanding node: {e}")
+                        continue
+                    
+                    # Backpropagate value
+                    for path_node in reversed(search_path):
+                        path_node.visit_count += 1
+                        path_node.total_value += value
+                        path_node.mean_value = path_node.total_value / path_node.visit_count
+                        
+                        # Flip value for opponent's perspective
+                        value = -value
+            
+            # Select best action from root
+            if not root.children:
+                # If no children, return a random legal action
+                legal_actions = root.state.legal_actions()
+                if legal_actions:
+                    return np.random.choice(legal_actions)
+                return 0  # Fallback
+                
+            # Use visit count to determine best action (most robust)
+            best_action = None
+            most_visits = -1
+            
+            for action, child in root.children.items():
+                if child.visit_count > most_visits:
+                    most_visits = child.visit_count
+                    best_action = action
+                    
+            if best_action is None:
+                # Final fallback
+                legal_actions = root.state.legal_actions()
+                if legal_actions:
+                    return np.random.choice(legal_actions)
+                return 0
+                
+            return best_action
+            
+        except Exception as e:
+            print(f"MCTS search error: {e}")
+            # Fallback to returning a legal random action
             try:
-                with torch.no_grad():
-                    batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
-                    batch_values = []
-                    batch_probs = []
-                    
-                    # Process in smaller chunks if needed
-                    for i in range(0, len(batch_obs), 4):  # Process 4 at a time to avoid memory issues
-                        chunk = batch_tensor[i:i+4]
-                        
-                        # Extract features
-                        features = self.policy_net.extract_features(chunk)
-                        
-                        # Get values
-                        values = self.policy_net.value_net(features)
-                        batch_values.extend(values.cpu().numpy())
-                        
-                        # Get action probabilities
-                        latent_pi = self.policy_net.policy_net(features)
-                        
-                        # Apply action masking
-                        board_flat_size = self.policy_net.board_flat_size
-                        action_masks = chunk[:, board_flat_size:]
-                        illegal_masks = (action_masks < 0.5)
-                        logits = latent_pi.masked_fill(illegal_masks, -1e8)
-                        probs = F.softmax(logits, dim=-1)
-                        
-                        batch_probs.append(probs.cpu())
-                    
-                    if batch_probs:
-                        batch_probs = torch.cat(batch_probs, dim=0)
-            except Exception as e:
-                print(f"Error in batch evaluation: {e}")
-                continue
-            
-            # Expansion and backpropagation for each leaf node
-            for i, (node, search_path) in enumerate(leaf_nodes):
-                if i >= len(batch_values):  # Safety check
-                    continue
-                    
-                value = batch_values[i]
-                probs = batch_probs[i] if i < len(batch_probs) else None
-                
-                # Expand node with evaluated probabilities
-                try:
-                    legal_actions = node.state.legal_actions()
-                    for action in legal_actions:
-                        if action not in node.children and probs is not None:
-                            next_state = node.state.clone()
-                            next_state.apply_action(action)
-                            node.children[action] = Node(
-                                state=next_state,
-                                prior=probs[action].item(),
-                                parent=node,
-                                root_player=node.root_player
-                            )
-                except Exception as e:
-                    print(f"Error expanding node: {e}")
-                    continue
-                
-                # Backpropagate value
-                for path_node in reversed(search_path):
-                    path_node.visit_count += 1
-                    path_node.total_value += value
-                    path_node.mean_value = path_node.total_value / path_node.visit_count
-                    
-                    # Flip value for opponent's perspective
-                    value = -value
-        
-        # Select best action from root
-        if not root.children:
-            # If no children, return a random legal action
-            legal_actions = root.state.legal_actions()
-            if legal_actions:
-                return np.random.choice(legal_actions)
-            return 0  # Fallback
-            
-        # Use visit count to determine best action (most robust)
-        best_action = None
-        most_visits = -1
-        
-        for action, child in root.children.items():
-            if child.visit_count > most_visits:
-                most_visits = child.visit_count
-                best_action = action
-                
-        return best_action
+                legal_actions = state.legal_actions()
+                if legal_actions:
+                    return np.random.choice(legal_actions)
+            except:
+                pass
+            return 0  # Last fallback
 
 
 class MCTSPPO(PPO):
@@ -402,10 +420,13 @@ class MCTSPPO(PPO):
     Includes custom rollout collection logic
     """
     def __init__(self, policy, env, **kwargs):
+        # Extract custom parameters
+        self.mcts_sims = kwargs.pop('mcts_sims', 100)
+        self.mcts_eval_only = kwargs.pop('mcts_eval_only', False)
+        
         super().__init__(policy, env, **kwargs)
         
         self.last_agent_step = [None] * self.n_envs
-        self.mcts_sims = kwargs.get('mcts_sims', 100)
         
         if self.n_envs % 2 == 0:
             half = self.n_envs // 2
@@ -493,7 +514,7 @@ class MCTSPPO(PPO):
         if self.current_opponent_policies is None:
             self.current_opponent_policies = [self.policy] * self.n_envs
             
-        use_mcts_in_training = True
+        use_mcts_in_training = not self.mcts_eval_only  # Only use MCTS during training if not eval_only mode
 
         while n_steps < n_rollout_steps:
             actions = np.zeros(self.n_envs, dtype=int)
@@ -528,7 +549,7 @@ class MCTSPPO(PPO):
                             try:
                                 # Get the state from the environment for MCTS
                                 env_state = env.get_attr('state', indices=[e])[0]
-                                # Run MCTS search
+                                # Run MCTS search to get a single action
                                 mcts_action = self.policy.mcts.search(env_state)
                                 actions[e] = mcts_action
                                 
@@ -540,9 +561,13 @@ class MCTSPPO(PPO):
                                 with torch.no_grad():
                                     _, values, _ = self.policy(single_obs)
                                     action_tensor = torch.tensor([mcts_action], device=self.device)
-                                    _, log_probs = self.policy.evaluate_actions(single_obs, action_tensor)
+                                    _, log_probs, _ = self.policy.evaluate_actions(single_obs, action_tensor)
                                 batch_values[e] = values[0]
-                                batch_log_probs[e] = log_probs[0]
+                                # Make sure log_probs is the right shape
+                                if log_probs.dim() == 0:
+                                    batch_log_probs[e] = log_probs
+                                else:
+                                    batch_log_probs[e] = log_probs[0]
                             except Exception as mcts_ex:
                                 print(f"Error using MCTS in training: {mcts_ex}, falling back to policy")
                                 # Fallback to regular policy if MCTS fails
@@ -696,7 +721,7 @@ class MCTSPPO(PPO):
         return True
 
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100):
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100, mcts_eval_only=False):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -725,7 +750,10 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
     print(f"Using learning rate schedule: YES (linear decay)")
     
     # Store MCTS simulations value
-    print(f"MCTS enabled during training with {mcts_sims} simulations")
+    if mcts_eval_only:
+        print(f"MCTS enabled during evaluation only with {mcts_sims} simulations")
+    else:
+        print(f"MCTS enabled during both training and evaluation with {mcts_sims} simulations")
         
     # Use a higher learning rate for faster training
     if learning_rate > 3e-4 and not checkpoint:
@@ -760,6 +788,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
         'vf_coef': 0.5,
         'policy_kwargs': policy_kwargs,
         'mcts_sims': mcts_sims,  # Pass MCTS simulations count
+        'mcts_eval_only': mcts_eval_only,  # Whether to use MCTS only during evaluation
     }
     
     # Add max_grad_norm only if it's not None
