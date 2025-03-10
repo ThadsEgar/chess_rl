@@ -420,7 +420,7 @@ def train(args):
             "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
             
             # Lower worker memory usage to avoid crashes
-            "num_gpus_per_worker": 0.0,  # Don't allocate GPU memory to workers
+            "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
             "compress_observations": True,  # Use compression to reduce memory usage
         },
     )
