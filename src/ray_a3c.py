@@ -42,9 +42,21 @@ class ParameterServer:
     A parameter server that holds the current model weights and distributes them to workers.
     """
     def __init__(self, model_config=None, device='cpu', checkpoint_path=None):
-        self.device = device
-        self.model = ChessCNN().to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        # Validate the requested device is actually available
+        self.device = self._validate_device(device)
+        
+        # Initialize model
+        try:
+            self.model = ChessCNN().to(self.device)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        except Exception as e:
+            logger.error(f"Error initializing model on {device}: {str(e)}")
+            # Fall back to CPU if device initialization fails
+            if self.device != 'cpu':
+                logger.info("Falling back to CPU")
+                self.device = 'cpu'
+                self.model = ChessCNN().to(self.device)
+                self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
         
         # Load from checkpoint if provided
         if checkpoint_path and os.path.exists(checkpoint_path):
@@ -73,13 +85,50 @@ class ParameterServer:
         self.entropy_coef = 0.01
         self.value_loss_coef = 0.5
         self.max_grad_norm = 0.5
+        
+        logger.info(f"ParameterServer initialized with device: {self.device}")
+    
+    def _validate_device(self, requested_device):
+        """Validate and possibly adjust the requested device based on availability."""
+        if requested_device == 'cuda':
+            # Verify CUDA is actually available
+            try:
+                if torch.cuda.is_available():
+                    # Test if CUDA can be initialized
+                    test_tensor = torch.zeros(1).cuda()
+                    del test_tensor
+                    return 'cuda'
+                else:
+                    logger.warning("CUDA requested but torch.cuda.is_available() is False")
+                    return 'cpu'
+            except Exception as e:
+                logger.warning(f"CUDA initialization failed: {str(e)}")
+                return 'cpu'
+        elif requested_device == 'mps':
+            # Verify MPS is available (Apple Silicon)
+            try:
+                if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    # Test if MPS can be initialized
+                    test_tensor = torch.zeros(1).to('mps')
+                    del test_tensor
+                    return 'mps'
+                else:
+                    logger.warning("MPS requested but not available")
+                    return 'cpu'
+            except Exception as e:
+                logger.warning(f"MPS initialization failed: {str(e)}")
+                return 'cpu'
+        
+        # For 'cpu' or any other device, just return as is
+        return requested_device
     
     def get_weights(self):
         """Return current model weights"""
         self.version += 1
         return {
             'weights': {k: v.cpu() for k, v in self.model.state_dict().items()},
-            'version': self.version
+            'version': self.version,
+            'device': self.device
         }
     
     def apply_gradients(self, gradients, metrics=None):
@@ -185,16 +234,33 @@ class RolloutWorker:
         self.worker_id = worker_id
         self.env = env_creator()
         self.param_server = param_server
-        self.device = device
-        self.mcts_sims = mcts_sims
+        
+        # Validate device
+        self.requested_device = device
+        self.device = self._validate_device(device)
         
         # Initialize model
-        self.model = ChessCNN().to(self.device)
-        self.model.eval()  # Start in eval mode
+        try:
+            self.model = ChessCNN().to(self.device)
+            self.model.eval()  # Start in eval mode
+        except Exception as e:
+            logger.error(f"Worker {worker_id}: Error initializing model on {device}: {str(e)}")
+            # Fall back to CPU if device initialization fails
+            if self.device != 'cpu':
+                logger.info(f"Worker {worker_id}: Falling back to CPU")
+                self.device = 'cpu'
+                self.model = ChessCNN().to(self.device)
+                self.model.eval()
         
         # Initialize MCTS if needed
+        self.mcts_sims = mcts_sims
         if self.mcts_sims > 0:
-            self.model.init_mcts(num_simulations=self.mcts_sims)
+            try:
+                self.model.init_mcts(num_simulations=self.mcts_sims)
+                logger.info(f"Worker {worker_id}: MCTS initialized with {mcts_sims} simulations")
+            except Exception as e:
+                logger.error(f"Worker {worker_id}: Error initializing MCTS: {str(e)}")
+                self.mcts_sims = 0
         
         # Get initial weights
         self.update_weights()
@@ -227,12 +293,58 @@ class RolloutWorker:
         
         # Initialize environment
         self.reset_env()
+        
+        logger.info(f"Worker {worker_id} initialized with device: {self.device}, MCTS sims: {self.mcts_sims}")
+    
+    def _validate_device(self, requested_device):
+        """Validate and possibly adjust the requested device based on availability."""
+        if requested_device == 'cuda':
+            # Verify CUDA is actually available
+            try:
+                if torch.cuda.is_available():
+                    # Test if CUDA can be initialized
+                    test_tensor = torch.zeros(1).cuda()
+                    del test_tensor
+                    return 'cuda'
+                else:
+                    logger.warning(f"Worker {self.worker_id}: CUDA requested but torch.cuda.is_available() is False")
+                    return 'cpu'
+            except Exception as e:
+                logger.warning(f"Worker {self.worker_id}: CUDA initialization failed: {str(e)}")
+                return 'cpu'
+        elif requested_device == 'mps':
+            # Verify MPS is available (Apple Silicon)
+            try:
+                if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    # Test if MPS can be initialized
+                    test_tensor = torch.zeros(1).to('mps')
+                    del test_tensor
+                    return 'mps'
+                else:
+                    logger.warning(f"Worker {self.worker_id}: MPS requested but not available")
+                    return 'cpu'
+            except Exception as e:
+                logger.warning(f"Worker {self.worker_id}: MPS initialization failed: {str(e)}")
+                return 'cpu'
+        
+        # For 'cpu' or any other device, just return as is
+        return requested_device
     
     def update_weights(self):
         """Get latest weights from parameter server"""
-        weights_info = ray.get(self.param_server.get_weights.remote())
-        self.model.load_state_dict({k: v.to(self.device) for k, v in weights_info['weights'].items()})
-        self.model_version = weights_info['version']
+        try:
+            weights_info = ray.get(self.param_server.get_weights.remote())
+            self.model.load_state_dict({k: v.to(self.device) for k, v in weights_info['weights'].items()})
+            self.model_version = weights_info['version']
+            
+            # Update device if parameter server is using a different device
+            if 'device' in weights_info and weights_info['device'] != self.device:
+                logger.info(f"Worker {self.worker_id}: Parameter server using {weights_info['device']}, " 
+                          f"worker using {self.device}")
+                
+        except Exception as e:
+            logger.error(f"Worker {self.worker_id}: Error updating weights: {str(e)}")
+            raise
     
     def reset_env(self):
         """Reset the environment and initialize a new episode"""

@@ -36,19 +36,37 @@ def detect_resources():
     memory = psutil.virtual_memory()
     memory_gb = memory.total / (1024**3)
     
-    # Detect GPU resources
+    # Detect GPU resources with better validation
     gpu_info = []
-    if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
-        for i in range(gpu_count):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_info.append(f"GPU {i}: {gpu_name}")
-    else:
+    gpu_count = 0
+    cuda_available = False
+    
+    # First check if CUDA is actually usable (not just installed)
+    try:
+        if torch.cuda.is_available():
+            # Try to actually initialize CUDA to confirm it works
+            test_tensor = torch.zeros(1).cuda()
+            del test_tensor  # Clean up
+            
+            # If we get here, CUDA is actually working
+            cuda_available = True
+            gpu_count = torch.cuda.device_count()
+            
+            for i in range(gpu_count):
+                try:
+                    gpu_name = torch.cuda.get_device_name(i)
+                    gpu_info.append(f"GPU {i}: {gpu_name}")
+                except Exception as e:
+                    gpu_info.append(f"GPU {i}: Error getting name ({str(e)})")
+    except Exception as e:
+        logger.warning(f"CUDA reported as available but failed initialization: {str(e)}")
+        logger.warning("Falling back to CPU mode")
+        cuda_available = False
         gpu_count = 0
     
     # Detect if we're on a Lambda Labs machine with A10 GPU
     on_lambda_a10 = False
-    if platform.node().startswith('lambda-') and gpu_count > 0:
+    if cuda_available and platform.node().startswith('lambda-'):
         for i in range(gpu_count):
             if 'A10' in torch.cuda.get_device_name(i):
                 on_lambda_a10 = True
@@ -56,7 +74,19 @@ def detect_resources():
     
     # Detect if we're on a Mac
     is_mac = platform.system() == 'Darwin'
-    has_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+    has_mps = False
+    
+    # Check for Metal Performance Shaders (Apple Silicon)
+    if is_mac:
+        try:
+            has_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+            if has_mps:
+                # Verify MPS actually works
+                test_tensor = torch.zeros(1).to('mps')
+                del test_tensor
+        except Exception as e:
+            logger.warning(f"MPS reported as available but failed: {str(e)}")
+            has_mps = False
     
     resources = {
         'hostname': socket.gethostname(),
@@ -65,6 +95,7 @@ def detect_resources():
         'memory_gb': memory_gb,
         'gpu_count': gpu_count,
         'gpu_info': gpu_info,
+        'cuda_available': cuda_available,
         'on_lambda_a10': on_lambda_a10,
         'is_mac': is_mac,
         'has_mps': has_mps
@@ -105,7 +136,8 @@ def configure_ray(resources, args):
             ray_config["dashboard_host"] = "0.0.0.0"
             ray_config["num_cpus"] = resources['cpu_count']
             
-            if resources['gpu_count'] > 0:
+            # Only set GPU resources if CUDA is actually available
+            if resources['cuda_available'] and resources['gpu_count'] > 0:
                 ray_config["num_gpus"] = resources['gpu_count']
             
             # If the password is provided, use it
@@ -142,6 +174,8 @@ def main():
                         help='Device to run on (cpu, cuda, mps, auto)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to model checkpoint for loading')
+    parser.add_argument('--force_cpu', action='store_true',
+                        help='Force CPU use even if GPU is available')
     
     # Distributed mode arguments
     parser.add_argument('--distributed', action='store_true',
@@ -195,13 +229,22 @@ def main():
     
     # Initialize appropriate device
     device = args.device
-    if device == 'auto':
-        if torch.cuda.is_available():
+    if args.force_cpu:
+        device = 'cpu'
+        logger.info("Forcing CPU use as requested")
+    elif device == 'auto':
+        if resources['cuda_available']:
             device = 'cuda'
         elif resources['has_mps']:
             device = 'mps'
         else:
             device = 'cpu'
+    elif device == 'cuda' and not resources['cuda_available']:
+        logger.warning("CUDA requested but not available, falling back to CPU")
+        device = 'cpu'
+    elif device == 'mps' and not resources['has_mps']:
+        logger.warning("MPS requested but not available, falling back to CPU")
+        device = 'cpu'
     
     # Log some information about the run
     logger.info(f"Starting Ray A3C in {args.mode} mode on {device}")
@@ -227,6 +270,8 @@ def main():
             
     except KeyboardInterrupt:
         logger.info("Execution interrupted by user")
+    except Exception as e:
+        logger.error(f"Error during execution: {e}", exc_info=True)
     finally:
         # Clean up Ray
         if ray.is_initialized():
