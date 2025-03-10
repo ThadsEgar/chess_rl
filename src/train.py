@@ -13,7 +13,7 @@ import re
 import sys
 import argparse
 
-def make_env(rank, seed=0):
+def make_env(rank, seed=0, simple_test=False):
     def _init():
         env = ChessEnv()
         env = ActionMaskWrapper(env)
@@ -293,6 +293,8 @@ def parse_arguments():
                         help='Maximum norm for gradients (default: 0.3 for more stable updates)')
     parser.add_argument('--target_kl', type=float, default=0.03,
                         help='Target KL divergence threshold for early stopping (default: 0.03)')
+    parser.add_argument('--simple_test', action='store_true',
+                        help='Use simplified chess positions for quick learning verification')
     return parser.parse_args()
 
 def main():
@@ -318,7 +320,7 @@ def main():
     multiprocessing.set_start_method('spawn', force=True)
     
     # Create environment functions
-    envs = [make_env(i) for i in range(n_envs)]
+    envs = [make_env(i, simple_test=args.simple_test) for i in range(n_envs)]
     
     # Create vectorized environment
     env = SubprocVecEnv(envs)

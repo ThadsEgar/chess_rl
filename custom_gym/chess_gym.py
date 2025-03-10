@@ -149,13 +149,22 @@ def get_game_result(state):
             result['stalemate'] = True
     return result
 
+def create_simple_endgame():
+    """Create a simple endgame position with white to move and checkmate in 1 or 2 moves."""
+    # Simple king and queen vs king endgame
+    # White king on e1, white queen on d1, black king on e8
+    fen = "4k3/8/8/8/8/8/8/3QK3 w - - 0 1"
+    state = pyspiel.loads_fen(fen, "chess")
+    return state
+
 class ChessEnv(gym.Env):
     metadata = {"render.modes": ["human"]}
     
-    def __init__(self):
+    def __init__(self, simple_test=False):
         super(ChessEnv, self).__init__()
         self.game = pyspiel.load_game("chess")
         self.state = self.game.new_initial_state()
+        self.simple_test = simple_test  # Flag for simple test mode
         self.action_space = spaces.Discrete(self.game.num_distinct_actions())
         
         self.piece_channels = 13  # 12 piece channels + player channel
@@ -179,7 +188,10 @@ class ChessEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.move_count = 0
-        self.state = self.game.new_initial_state()
+        if self.simple_test:
+            self.state = create_simple_endgame()
+        else:
+            self.state = self.game.new_initial_state()
         self.last_move = None
         self.position_history = [str(self.state)]
         return self._get_obs(), {'starting_player': self.state.current_player()}
@@ -248,7 +260,7 @@ class ChessEnv(gym.Env):
             # Terminal rewards are much more significant
             result = get_game_result(self.state)
             if result['white_won'] or result['black_won']:
-                reward = reward * 20.0  # Amplify win/loss rewards even more
+                reward = reward * 20.0
             elif result['draw']:
                 # Slightly penalize draws to encourage decisive play
                 reward = -0.1
@@ -349,3 +361,12 @@ class ActionMaskWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         action_mask = self.env._get_action_mask()
         return {'board': obs, 'action_mask': action_mask}, reward, terminated, truncated, info
+
+# Modify the environment creation function in src/train.py
+def make_env(rank, seed=0, simple_test=False):
+    def _init():
+        env = ChessEnv(simple_test=simple_test)
+        env = ActionMaskWrapper(env)
+        env.reset(seed=seed + rank)
+        return env
+    return _init
