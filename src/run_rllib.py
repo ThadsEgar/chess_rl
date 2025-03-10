@@ -305,7 +305,7 @@ def train(args):
             "log_level": "DEBUG",
             # Worker configuration to ensure observation space is correctly initialized
             "remote_worker_envs": False,
-            "recreate_failed_workers": True,
+            "restart_failed_env_runners": True,
             "restart_failed_sub_environments": True
         },
     )
