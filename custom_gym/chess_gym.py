@@ -200,9 +200,57 @@ class ChessEnv(gym.Env):
         truncated = self.move_count >= self.max_moves
         done = self.state.is_terminal() or truncated
         
+        # Get base rewards from environment
         rewards = self.state.rewards()
         reward = rewards[current_player]
 
+        # Calculate intermediate rewards to provide signal during training
+        intermediate_reward = 0.0
+        
+        # Get board encoding to calculate material balance
+        board = encode_board(self.state)
+        material_balance = 0
+        
+        # Calculate material balance (positive for white advantage, negative for black)
+        # Piece values: pawn=1, knight/bishop=3, rook=5, queen=9
+        piece_values = {1: 1, 2: 3, 3: 3, 4: 5, 5: 9, 6: 0,  # White pieces (king has no material value)
+                      -1: -1, -2: -3, -3: -3, -4: -5, -5: -9, -6: 0}  # Black pieces
+        
+        for value in board.flatten():
+            if value != 0:  # Skip empty squares
+                material_balance += piece_values.get(value, 0)
+        
+        # Scale material balance to a small reward (-0.01 to 0.01 per move)
+        material_reward = material_balance * 0.001
+        
+        # Legal move count reward (encourage positions with more options)
+        next_legal_count = len(self.state.legal_actions())
+        move_count_reward = min(0.0001 * next_legal_count, 0.001)  # Cap at 0.001
+        
+        # Center control reward
+        center_squares = board[3:5, 3:5]  # e4, d4, e5, d5
+        center_control = 0
+        for r in range(2):
+            for c in range(2):
+                if center_squares[r, c] > 0:  # White piece
+                    center_control += 0.0005
+                elif center_squares[r, c] < 0:  # Black piece
+                    center_control -= 0.0005
+        
+        # Combine intermediate rewards
+        if current_player == 1:  # White
+            intermediate_reward = material_reward + move_count_reward + center_control
+        else:  # Black
+            intermediate_reward = -material_reward + move_count_reward - center_control
+        
+        # If terminal state, use the game result reward (much larger)
+        if done:
+            # Terminal rewards are much more significant
+            reward = reward * 10.0  # Amplify terminal rewards
+        else:
+            # During the game, use small intermediate rewards
+            reward = intermediate_reward
+        
         result = get_game_result(self.state)
         info = {
             'move_count': self.move_count,
@@ -220,7 +268,9 @@ class ChessEnv(gym.Env):
             'is_checkmate': result['checkmate'],
             'is_stalemate': result['stalemate'],
             'position_repetition_count': self.position_history.count(str(self.state)),
-            'action_mask': self._get_action_mask()
+            'action_mask': self._get_action_mask(),
+            'material_balance': material_balance,
+            'intermediate_reward': intermediate_reward
         }
         
         # Set outcome based on game result: white win -> outcome=1, black win -> outcome=-1, draw -> outcome=0.

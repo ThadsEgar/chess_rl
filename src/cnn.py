@@ -495,35 +495,41 @@ class MCTSPPO(PPO):
             agent_turn_indices = [e for e in range(self.n_envs) if current_players[e] == self.agent_record_player[e]]
             opponent_turn_indices = [e for e in range(self.n_envs) if current_players[e] != self.agent_record_player[e]]
 
-            if agent_turn_indices:
-                if not use_mcts_in_training:
-                    try:
-                        agent_boards = self._last_obs['board'][agent_turn_indices]
-                        agent_masks = self._last_obs['action_mask'][agent_turn_indices]
+            # ===== Collect both agent and opponent experiences =====
+            # We'll track whose turn it is but collect experiences from both sides
+            acting_indices = agent_turn_indices + opponent_turn_indices
+            
+            # Process all observations in a single batch for efficiency
+            if acting_indices:
+                try:
+                    all_boards = self._last_obs['board'][acting_indices]
+                    all_masks = self._last_obs['action_mask'][acting_indices]
+                    
+                    board_tensor = torch.as_tensor(all_boards).to(self.device)
+                    mask_tensor = torch.as_tensor(all_masks).to(self.device)
+                    obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
+                    
+                    with torch.no_grad():
+                        # Use agent policy for all observations for consistent learning
+                        all_actions, all_values, all_log_probs = self.policy(obs_dict)
+                    
+                    all_actions = all_actions.cpu().numpy()
+                    for i, e in enumerate(acting_indices):
+                        # Record the action chosen by the policy
+                        actions[e] = all_actions[i]
+                        batch_values[e] = all_values[i]
+                        batch_log_probs[e] = all_log_probs[i]
                         
-                        board_tensor = torch.as_tensor(agent_boards).to(self.device)
-                        mask_tensor = torch.as_tensor(agent_masks).to(self.device)
-                        obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
-                        
-                        with torch.no_grad():
-                            agent_actions, agent_values, agent_log_probs = self.policy(obs_dict)
-                        
-                        agent_actions = agent_actions.cpu().numpy()
-                        for i, e in enumerate(agent_turn_indices):
-                            actions[e] = agent_actions[i]
-                            batch_values[e] = agent_values[i]
-                            batch_log_probs[e] = agent_log_probs[i]
-                            self.last_agent_step[e] = rollout_buffer.pos
-                    except Exception as ex:
-                        print(f"Error in agent policy evaluation: {ex}")
-                        for e in agent_turn_indices:
-                            legal_actions = env.get_attr('state', indices=[e])[0].legal_actions()
-                            if legal_actions:
-                                actions[e] = np.random.choice(legal_actions)
-                else:
-                    # MCTS implementation (unchanged)
-                    pass
-
+                        # Always record position for both sides, not just agent
+                        self.last_agent_step[e] = rollout_buffer.pos
+                except Exception as ex:
+                    print(f"Error in policy evaluation: {ex}")
+                    for e in acting_indices:
+                        legal_actions = env.get_attr('state', indices=[e])[0].legal_actions()
+                        if legal_actions:
+                            actions[e] = np.random.choice(legal_actions)
+            
+            # For opponent indices, override actions with opponent policy
             if opponent_turn_indices:
                 try:
                     policy_groups = {}
@@ -546,6 +552,8 @@ class MCTSPPO(PPO):
                             opp_actions = opp_actions.cpu().numpy()
                         
                         for i, e in enumerate(indices):
+                            # Replace with opponent policy action 
+                            # (but keep the value/log_prob from agent policy)
                             actions[e] = opp_actions[i]
                 except Exception as ex:
                     print(f"Error in opponent policy evaluation: {ex}")
@@ -579,17 +587,12 @@ class MCTSPPO(PPO):
             if not callback.on_step():
                 return False
 
-            batch_obs = self._last_obs
-            batch_actions = actions
-            batch_rewards = rewards
-            batch_episode_starts = self._last_episode_starts
-            batch_dones = dones
-
+            # Add all transitions to buffer, not just agent's turns
             rollout_buffer.add(
-                batch_obs,
-                batch_actions.reshape(self.n_envs, 1),
-                batch_rewards,
-                batch_episode_starts,
+                self._last_obs,
+                actions.reshape(self.n_envs, 1),
+                rewards,
+                self._last_episode_starts,
                 batch_values,
                 batch_log_probs
             )
@@ -628,14 +631,14 @@ class MCTSPPO(PPO):
                     else:
                         current_players[env_idx] = infos[env_idx].get("current_player", current_players[env_idx])           
                     
-                    # Fix for UnboundLocalError
+                    # Update opponent policy
                     if self.opponent_policies and np.random.rand() < self.opponent_pool_prob:
                         self.current_opponent_policies[env_idx] = np.random.choice(self.opponent_policies)
                     else:
                         self.current_opponent_policies[env_idx] = self.policy
 
             self._last_obs = new_obs
-            self._last_episode_starts = batch_dones
+            self._last_episode_starts = dones
             self.num_timesteps += self.n_envs
             n_steps += 1
 
@@ -658,7 +661,7 @@ class MCTSPPO(PPO):
         return True
 
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=0.5, use_layer_norm=True):
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=0.5, use_layer_norm=True, target_kl=0.015):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -681,6 +684,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
     print(f"Max gradient norm: {max_grad_norm}")
     print(f"Using normalization: NO (removed for stability)")
     print(f"Using learning rate schedule: YES (linear decay)")
+    print(f"Target KL divergence: {target_kl} (will stop updating if exceeded)")
     
     # Use a lower learning rate when not using normalization
     if learning_rate > 1e-5 and not checkpoint:
@@ -717,6 +721,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
             vf_coef=0.5,
             max_grad_norm=max_grad_norm,  # Add gradient clipping
             policy_kwargs=policy_kwargs,
+            target_kl=target_kl,    # Add early stopping based on KL divergence
         )
     else:
         model = MCTSPPO(
@@ -735,6 +740,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
             ent_coef=0.01,          # Reduced entropy coefficient for more stable updates 
             vf_coef=0.5,
             max_grad_norm=max_grad_norm,  # Add gradient clipping
+            target_kl=target_kl,    # Add early stopping based on KL divergence
         )
     
     return model
