@@ -204,23 +204,23 @@ class Node:
         from custom_gym.chess_gym import canonical_encode_board_for_cnn
         
         try:
-            # Get board representation
-            board_obs = canonical_encode_board_for_cnn(self.state)
-            board_obs_flat = board_obs.flatten()
-            
-            # Get legal actions
-            legal_actions = self.state.legal_actions()
-            
+        # Get board representation
+        board_obs = canonical_encode_board_for_cnn(self.state)
+        board_obs_flat = board_obs.flatten()
+        
+        # Get legal actions
+        legal_actions = self.state.legal_actions()
+        
             # Create action mask (fixed size for chess: 4672)
-            mask = np.zeros(4672, dtype=np.float32)
-            mask[legal_actions] = 1.0
-            
-            # Combine for full observation
-            obs = np.concatenate([board_obs_flat, mask])
-            
-            # Get policy evaluation
-            with torch.no_grad():
-                obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(policy_net.device)
+        mask = np.zeros(4672, dtype=np.float32)
+        mask[legal_actions] = 1.0
+        
+        # Combine for full observation
+        obs = np.concatenate([board_obs_flat, mask])
+        
+        # Get policy evaluation
+        with torch.no_grad():
+            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(policy_net.device)
                 # Create Dict observation for policy
                 obs_dict = {
                     'board': obs_tensor[:, :832],  # First 832 elements are the board representation
@@ -234,21 +234,21 @@ class Node:
                 logits = policy_net.policy_net(policy_net.extract_features(obs_dict))
                 illegal_actions_mask = (obs_dict['action_mask'] < 0.5)
                 logits = logits.masked_fill(illegal_actions_mask, -1e8)
-                probs = F.softmax(logits, dim=-1).squeeze(0)
-                
+            probs = F.softmax(logits, dim=-1).squeeze(0)
+        
                 # For legal actions, create child nodes
-                for action in legal_actions:
-                    if action not in self.children:
-                        next_state = self.state.clone()
-                        next_state.apply_action(action)
-                        self.children[action] = Node(
-                            state=next_state,
-                            prior=probs[action].item(),
-                            parent=self,
-                            root_player=self.root_player
-                        )
-                
-                return values.item()
+        for action in legal_actions:
+            if action not in self.children:
+                next_state = self.state.clone()
+                next_state.apply_action(action)
+                self.children[action] = Node(
+                    state=next_state,
+                    prior=probs[action].item(),
+                    parent=self,
+                    root_player=self.root_player
+                )
+        
+        return values.item()
         except Exception as e:
             print(f"Error in Node.expand: {str(e)}")
             return 0.0
@@ -305,14 +305,14 @@ class MCTS:
                     if root.is_terminal:
                         continue
                         
-                    node = root
-                    search_path = [node]
-                    
+            node = root
+            search_path = [node]
+            
                     # Find a leaf node using MCTS selection
                     while not node.is_terminal and node.children:
-                        action, node = node.select_child(self.c_puct)
-                        search_path.append(node)
-                    
+                action, node = node.select_child(self.c_puct)
+                search_path.append(node)
+            
                     # If we found an unexpanded leaf, add it to the batch
                     if not node.is_terminal and not node.children:
                         all_leaves.append((root_idx, node, search_path))
@@ -412,7 +412,7 @@ class MCTS:
                                 path_node.mean_value = path_node.total_value / path_node.visit_count
                                 
                                 # Flip value for opponent's perspective
-                                value = -value
+                    value = -value
                         except Exception as e:
                             print(f"Error in expansion/backpropagation: {e}")
             
@@ -430,7 +430,7 @@ class MCTS:
                         best_actions.append(np.random.choice(legal_actions))
                     else:
                         best_actions.append(0)  # Fallback
-                else:
+            else:
                     # Use visit count to determine best action
                     best_action = None
                     most_visits = -1
@@ -457,8 +457,8 @@ class MCTS:
                 return np.random.choice(legal_actions)
         except:
             pass
-        return 0
-        
+            return 0
+            
     def search(self, state):
         """Single state search - now implemented as a wrapper around batch_search"""
         try:
@@ -543,7 +543,7 @@ class MCTSPPO(PPO):
         # Initialize current opponent policies only if policy is available
         # This handles the case when loading from a checkpoint
         if hasattr(self, 'policy') and self.policy is not None:
-            self.current_opponent_policies = [self.policy] * self.n_envs
+        self.current_opponent_policies = [self.policy] * self.n_envs
         else:
             # Will be initialized later when policy becomes available
             self.current_opponent_policies = None
@@ -621,9 +621,9 @@ class MCTSPPO(PPO):
                     
                     board_tensor = torch.as_tensor(all_boards).to(self.device)
                     mask_tensor = torch.as_tensor(all_masks).to(self.device)
-                    obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
-                    
-                    with torch.no_grad():
+                obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
+                
+                with torch.no_grad():
                         # Use agent policy for all observations for consistent learning
                         all_actions, all_values, all_log_probs = self.policy(obs_dict)
                     
@@ -720,7 +720,7 @@ class MCTSPPO(PPO):
             if opponent_turn_indices:
                 try:
                     policy_groups = {}
-                    for e in opponent_turn_indices:
+            for e in opponent_turn_indices:
                         policy = self.current_opponent_policies[e]
                         if policy not in policy_groups:
                             policy_groups[policy] = []
@@ -734,7 +734,7 @@ class MCTSPPO(PPO):
                         mask_tensor = torch.as_tensor(opp_masks).to(self.device)
                         obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
                         
-                        with torch.no_grad():
+                with torch.no_grad():
                             opp_actions, _, _ = policy(obs_dict, deterministic=False)
                             opp_actions = opp_actions.cpu().numpy()
                         
@@ -753,11 +753,11 @@ class MCTSPPO(PPO):
                             actions[env_idx] = 0
 
             try:
-                new_obs, rewards, dones, infos = env.step(actions)
-                if not isinstance(infos, list):
-                    infos = [infos] * self.n_envs
-                        
-                current_players = [info.get("current_player", 0) for info in infos]
+            new_obs, rewards, dones, infos = env.step(actions)
+            if not isinstance(infos, list):
+                infos = [infos] * self.n_envs
+                    
+            current_players = [info.get("current_player", 0) for info in infos]
             except Exception as ex:
                 print(f"Error stepping environment: {ex}")
                 try:
@@ -835,18 +835,18 @@ class MCTSPPO(PPO):
                 break
 
         try:
-            with torch.no_grad():
-                obs_tensor = {
-                    key: torch.as_tensor(value, device=self.device)
-                    for key, value in self._last_obs.items()
-                }
-                last_values = self.policy.predict_values(obs_tensor)
+        with torch.no_grad():
+            obs_tensor = {
+                key: torch.as_tensor(value, device=self.device)
+                for key, value in self._last_obs.items()
+            }
+            last_values = self.policy.predict_values(obs_tensor)
                 
             rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
         except Exception as ex:
             print(f"Error computing returns and advantage: {ex}")
             last_values = torch.zeros(self.n_envs, device=self.device)
-            rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
+        rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
         return True
 
@@ -978,7 +978,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
     if checkpoint:
         print(f'Checkpoint: {checkpoint} loaded')
         model = MCTSPPO.load(
-            checkpoint,
+            checkpoint, 
             **model_kwargs
         )
     else:

@@ -33,8 +33,23 @@ def make_env(seed=0, simple_test=False, white_advantage=None):
     env.reset(seed=seed)
     return env
 
+# Function to get available resources on the system
+def get_available_resources():
+    """Get available GPU and CPU resources on the system"""
+    try:
+        gpu_count = torch.cuda.device_count()
+    except:
+        gpu_count = 0
+    
+    cpu_count = os.cpu_count() or 16  # Default to 16 if can't detect
+    
+    return {
+        "gpu_count": gpu_count,
+        "cpu_count": cpu_count
+    }
+
 # Actor class - collects experiences and sends gradients
-@ray.remote(num_gpus=0.2)  # Allocate fraction of GPU to each actor
+@ray.remote(num_gpus=0.05)
 class A3CActor:
     def __init__(self, actor_id, model_cls, obs_space, action_space, config):
         self.actor_id = actor_id
@@ -481,7 +496,43 @@ class A3CLearner:
 class A3CTrainer:
     def __init__(self, config):
         self.config = config
-        ray.init(address=config["ray_address"], ignore_reinit_error=True)
+        
+        # Auto-adjust number of actors based on available resources
+        if config.get("auto_adjust_actors", True):
+            resources = get_available_resources()
+            gpu_count = resources["gpu_count"]
+            cpu_count = resources["cpu_count"]
+            
+            # If we have GPUs, limit actors based on GPU resources
+            if gpu_count > 0:
+                # Calculate how many actors we can fit with GPU fraction
+                gpu_fraction = 0.05  # GPU fraction per actor
+                max_gpu_actors = int(gpu_count / gpu_fraction)
+                
+                # Also consider CPU constraints (1 CPU per actor)
+                max_cpu_actors = max(1, cpu_count - 2)  # Leave 2 CPUs for system
+                
+                # Take the minimum of the two constraints
+                max_actors = min(max_gpu_actors, max_cpu_actors)
+                
+                # Limit actors to what's available
+                adjusted_actors = min(config["num_actors"], max_actors)
+                
+                if adjusted_actors < config["num_actors"]:
+                    print(f"Auto-adjusting actors from {config['num_actors']} to {adjusted_actors} based on available resources")
+                    config["num_actors"] = adjusted_actors
+            else:
+                # CPU-only mode
+                max_actors = max(1, cpu_count - 2)  # Leave 2 CPUs for system
+                
+                if config["num_actors"] > max_actors:
+                    print(f"Auto-adjusting actors from {config['num_actors']} to {max_actors} based on available CPU resources")
+                    config["num_actors"] = max_actors
+        
+        # Initialize Ray if not already done
+        ray_address = config.get("ray_address")
+        if not ray.is_initialized():
+            ray.init(address=ray_address, ignore_reinit_error=True)
         
         # Create test environment to get spaces
         env = make_env()
@@ -600,6 +651,8 @@ def parse_args():
                       help='Number of actor processes')
     parser.add_argument('--n_envs_per_actor', type=int, default=4,
                       help='Number of environments per actor')
+    parser.add_argument('--auto_adjust_actors', action='store_true', default=True,
+                      help='Automatically adjust number of actors based on available resources')
     
     # Training parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
