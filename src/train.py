@@ -281,8 +281,8 @@ def parse_arguments():
                         help='Total number of timesteps to train for')
     parser.add_argument('--save_freq', type=int, default=50000,
                         help='Frequency (in timesteps) to save model checkpoints')
-    parser.add_argument('--learning_rate', type=float, default=5e-5,
-                        help='Initial learning rate for the optimizer (default: 5e-5)')
+    parser.add_argument('--learning_rate', type=float, default=2e-4,
+                        help='Learning rate for the PPO algorithm')
     parser.add_argument('--n_epochs', type=int, default=4,
                         help='Number of epochs when optimizing the surrogate loss (default: 4)')
     parser.add_argument('--batch_size', type=int, default=4096,
@@ -295,6 +295,8 @@ def parse_arguments():
                         help='Use simplified chess positions for quick learning verification')
     parser.add_argument('--balanced_test', action='store_true',
                         help='Run balanced training to ensure both white and black learn equally')
+    parser.add_argument('--mcts_sims', type=int, default=100,
+                        help='Number of MCTS simulations during training (default: 100)')
     return parser.parse_args()
 
 def main():
@@ -383,15 +385,16 @@ def main():
     
     # Use CNN-based policy
     model = create_cnn_mcts_ppo(
-        env=env,
-        tensorboard_log="data/logs",
+        env,
+        tensorboard_log="data/logs/",
         device=device,
         checkpoint=checkpoint,
         learning_rate=args.learning_rate,
         n_epochs=args.n_epochs,
         batch_size=args.batch_size,
         clip_range=args.clip_range,
-        max_grad_norm=args.max_grad_norm
+        max_grad_norm=args.max_grad_norm,
+        mcts_sims=args.mcts_sims
     )
     
     # Set up callbacks

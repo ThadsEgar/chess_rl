@@ -166,6 +166,13 @@ class CNNMCTSActorCriticPolicy(ActorCriticPolicy):
         values = self.value_net(features)
         return values
 
+    def init_mcts(self, num_simulations=100, c_puct=2.0):
+        """Initialize MCTS for policy improvement"""
+        if self.mcts is None:
+            self.mcts = MCTS(self, num_simulations=num_simulations, c_puct=c_puct)
+            print(f"MCTS initialized with {num_simulations} simulations")
+        return self.mcts
+
 
 class Node:
     def __init__(self, state, prior=1.0, parent=None, root_player=None):
@@ -398,6 +405,7 @@ class MCTSPPO(PPO):
         super().__init__(policy, env, **kwargs)
         
         self.last_agent_step = [None] * self.n_envs
+        self.mcts_sims = kwargs.get('mcts_sims', 100)
         
         if self.n_envs % 2 == 0:
             half = self.n_envs // 2
@@ -479,13 +487,13 @@ class MCTSPPO(PPO):
                 
         # Initialize policy if not already done
         if self.policy.mcts is None:
-            self.policy.mcts = MCTS(self.policy, num_simulations=50, c_puct=2.0)
+            self.policy.init_mcts(num_simulations=self.mcts_sims, c_puct=2.0)
             
         # Initialize current_opponent_policies if it's None
         if self.current_opponent_policies is None:
             self.current_opponent_policies = [self.policy] * self.n_envs
             
-        use_mcts_in_training = False
+        use_mcts_in_training = True
 
         while n_steps < n_rollout_steps:
             actions = np.zeros(self.n_envs, dtype=int)
@@ -515,10 +523,37 @@ class MCTSPPO(PPO):
                     
                     all_actions = all_actions.cpu().numpy()
                     for i, e in enumerate(acting_indices):
-                        # Record the action chosen by the policy
-                        actions[e] = all_actions[i]
-                        batch_values[e] = all_values[i]
-                        batch_log_probs[e] = all_log_probs[i]
+                        # If this is an agent turn and MCTS is enabled, use MCTS for action selection
+                        if e in agent_turn_indices and use_mcts_in_training and self.policy.mcts is not None:
+                            try:
+                                # Get the state from the environment for MCTS
+                                env_state = env.get_attr('state', indices=[e])[0]
+                                # Run MCTS search
+                                mcts_action = self.policy.mcts.search(env_state)
+                                actions[e] = mcts_action
+                                
+                                # Re-evaluate the action to get value and log_prob
+                                single_obs = {
+                                    'board': board_tensor[i:i+1],
+                                    'action_mask': mask_tensor[i:i+1]
+                                }
+                                with torch.no_grad():
+                                    _, values, _ = self.policy(single_obs)
+                                    action_tensor = torch.tensor([mcts_action], device=self.device)
+                                    _, log_probs = self.policy.evaluate_actions(single_obs, action_tensor)
+                                batch_values[e] = values[0]
+                                batch_log_probs[e] = log_probs[0]
+                            except Exception as mcts_ex:
+                                print(f"Error using MCTS in training: {mcts_ex}, falling back to policy")
+                                # Fallback to regular policy if MCTS fails
+                                actions[e] = all_actions[i]
+                                batch_values[e] = all_values[i]
+                                batch_log_probs[e] = all_log_probs[i]
+                        else:
+                            # Regular policy action for opponent turns or when MCTS is disabled
+                            actions[e] = all_actions[i]
+                            batch_values[e] = all_values[i]
+                            batch_log_probs[e] = all_log_probs[i]
                         
                         # Always record position for both sides, not just agent
                         self.last_agent_step[e] = rollout_buffer.pos
@@ -661,7 +696,7 @@ class MCTSPPO(PPO):
         return True
 
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True):
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -689,10 +724,13 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
         
     print(f"Using learning rate schedule: YES (linear decay)")
     
+    # Store MCTS simulations value
+    print(f"MCTS enabled during training with {mcts_sims} simulations")
+        
     # Use a higher learning rate for faster training
-    if learning_rate > 8e-5 and not checkpoint:
-        print(f"NOTE: Reducing initial learning rate to 8e-5 for stability")
-        learning_rate = 8e-5
+    if learning_rate > 3e-4 and not checkpoint:
+        print(f"NOTE: Reducing initial learning rate to 3e-4 for stability")
+        learning_rate = 3e-4
     
     # Create a linear learning rate schedule
     def linear_schedule(progress_remaining):
@@ -718,9 +756,10 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
         'gamma': 0.99,
         'device': device,
         'clip_range': clip_range,
-        'ent_coef': 0.01,
+        'ent_coef': 0.1,  # Increased from 0.01 to 0.1 for much more exploration
         'vf_coef': 0.5,
         'policy_kwargs': policy_kwargs,
+        'mcts_sims': mcts_sims,  # Pass MCTS simulations count
     }
     
     # Add max_grad_norm only if it's not None
