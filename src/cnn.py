@@ -7,6 +7,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.buffers import RolloutBuffer
 from stable_baselines3.common.utils import explained_variance
+import time
 
 # Custom Layer Normalization for 2D convolutional features
 class LayerNorm2d(nn.Module):
@@ -265,153 +266,205 @@ class MCTS:
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.device = getattr(policy_net, 'device', 'cpu')
+        print(f"MCTS initialized with {num_simulations} simulations using device: {self.device}")
+    
+    def batch_search(self, states):
+        """
+        Perform MCTS search on multiple states in parallel.
         
-    def search(self, state):
+        Args:
+            states: List of game states to search
+            
+        Returns:
+            List of best actions for each state
+        """
         try:
-            root = Node(state)
-            
-            # Batch size for parallel evaluations
-            batch_size = 8  # Can be increased based on GPU memory
-            
-            for sim_batch in range(0, self.num_simulations, batch_size):
-                # Actual batch size for this iteration
-                current_batch_size = min(batch_size, self.num_simulations - sim_batch)
+            if not states:
+                return []
                 
-                # Selection and expansion phases - prepare batch
-                leaf_nodes = []
-                for _ in range(current_batch_size):
+            start_time = time.time()
+            num_states = len(states)
+            if num_states > 1:
+                print(f"Starting batch MCTS search for {num_states} states with {self.num_simulations} simulations each")
+                
+            # Create a root node for each state
+            roots = [Node(state) for state in states]
+            
+            # For efficiency, use a larger batch size when processing many states
+            eval_batch_size = min(32, max(16, num_states * 4))
+            
+            # Perform the specified number of simulations
+            for sim_iter in range(self.num_simulations):
+                # Gather leaf nodes from all search trees
+                all_leaves = []
+                all_paths = []
+                
+                # Selection phase - done separately for each tree
+                for root_idx, root in enumerate(roots):
+                    if root.is_terminal:
+                        continue
+                        
                     node = root
                     search_path = [node]
                     
-                    # Selection phase - find leaf node
+                    # Find a leaf node using MCTS selection
                     while not node.is_terminal and node.children:
                         action, node = node.select_child(self.c_puct)
                         search_path.append(node)
                     
-                    # If leaf node is not terminal and not expanded, add to batch
+                    # If we found an unexpanded leaf, add it to the batch
                     if not node.is_terminal and not node.children:
-                        leaf_nodes.append((node, search_path))
+                        all_leaves.append((root_idx, node, search_path))
                 
-                # Skip if no leaf nodes to evaluate
-                if not leaf_nodes:
+                # Log progress for large batches
+                if num_states > 4 and sim_iter % 10 == 0 and sim_iter > 0:
+                    elapsed = time.time() - start_time
+                    remaining = (elapsed / sim_iter) * (self.num_simulations - sim_iter)
+                    print(f"MCTS progress: {sim_iter}/{self.num_simulations} simulations ({elapsed:.1f}s elapsed, ~{remaining:.1f}s remaining)")
+                
+                if not all_leaves:
                     continue
                 
-                # Prepare batch for network evaluation
-                batch_obs = []
-                for node, _ in leaf_nodes:
+                # Process leaves in smaller batches to avoid memory issues
+                for batch_start in range(0, len(all_leaves), eval_batch_size):
+                    batch_end = min(batch_start + eval_batch_size, len(all_leaves))
+                    current_leaves = all_leaves[batch_start:batch_end]
+                    
+                    # Prepare batch for network evaluation
+                    batch_obs = []
+                    for _, node, _ in current_leaves:
+                        try:
+                            from custom_gym.chess_gym import canonical_encode_board_for_cnn
+                            board_obs = canonical_encode_board_for_cnn(node.state)
+                            board_obs_flat = board_obs.flatten()
+                            legal_actions = node.state.legal_actions()
+                            mask = np.zeros(4672, dtype=np.float32)
+                            mask[legal_actions] = 1.0
+                            obs = np.concatenate([board_obs_flat, mask])
+                            batch_obs.append(obs)
+                        except Exception as e:
+                            print(f"Error preparing batch observation: {e}")
+                            # Add a dummy observation to maintain alignment
+                            batch_obs.append(np.zeros(4672 + 832, dtype=np.float32))
+                    
+                    if not batch_obs:
+                        continue
+                        
+                    # Evaluate all leaf nodes in a single batch (much faster!)
                     try:
-                        from custom_gym.chess_gym import canonical_encode_board_for_cnn
-                        board_obs = canonical_encode_board_for_cnn(node.state)
-                        board_obs_flat = board_obs.flatten()
-                        legal_actions = node.state.legal_actions()
-                        # Fixed size for chess action space instead of calling num_actions
-                        mask = np.zeros(4672, dtype=np.float32)
-                        mask[legal_actions] = 1.0
-                        obs = np.concatenate([board_obs_flat, mask])
-                        batch_obs.append(obs)
+                        with torch.no_grad():
+                            # Move data to GPU in an optimized way
+                            if self.device == 'cuda':
+                                # Use pinned memory for faster CPU->GPU transfer
+                                batch_tensor = torch.FloatTensor(np.array(batch_obs)).pin_memory().to(self.device, non_blocking=True)
+                            else:
+                                batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
+                                
+                            batch_board = batch_tensor[:, :832]  # Board representation is first 832 elements
+                            batch_mask = batch_tensor[:, 832:]  # Action mask is the rest
+                            
+                            # Create batch of dict observations
+                            batch_dict_obs = {
+                                'board': batch_board,
+                                'action_mask': batch_mask
+                            }
+                            
+                            # Get values from policy network
+                            _, batch_values, _ = self.policy_net(batch_dict_obs)
+                            batch_values = batch_values.cpu().detach()
+                            
+                            # Get probabilities for expansion
+                            logits = self.policy_net.policy_net(self.policy_net.extract_features(batch_dict_obs))
+                            illegal_actions_mask = (batch_dict_obs['action_mask'] < 0.5)
+                            logits = logits.masked_fill(illegal_actions_mask, -1e8)
+                            batch_probs = F.softmax(logits, dim=-1).cpu().detach()
                     except Exception as e:
-                        print(f"Error preparing observation: {e}")
-                        continue
-                
-                if not batch_obs:
-                    continue
-                
-                # Convert to tensor and evaluate batch
-                try:
-                    with torch.no_grad():
-                        batch_tensor = torch.FloatTensor(np.array(batch_obs)).to(self.device)
-                        batch_board = batch_tensor[:, :832]  # Board representation is first 832 elements
-                        batch_mask = batch_tensor[:, 832:]  # Action mask is the rest
-                        
-                        # Create batch of dict observations
-                        batch_dict_obs = {
-                            'board': batch_board,
-                            'action_mask': batch_mask
-                        }
-                        
-                        # Get values from policy network
-                        _, batch_values, _ = self.policy_net(batch_dict_obs)
-                        batch_values = batch_values.cpu().detach()
-                        
-                        # Get probabilities for expansion
-                        logits = self.policy_net.policy_net(self.policy_net.extract_features(batch_dict_obs))
-                        illegal_actions_mask = (batch_dict_obs['action_mask'] < 0.5)
-                        logits = logits.masked_fill(illegal_actions_mask, -1e8)
-                        batch_probs = F.softmax(logits, dim=-1).cpu().detach()
-                except Exception as e:
-                    print(f"Error in batch evaluation: {e}")
-                    continue
-                
-                # Expansion and backpropagation for each leaf node
-                for i, (node, search_path) in enumerate(leaf_nodes):
-                    if i >= len(batch_values):  # Safety check
-                        continue
-                        
-                    value = batch_values[i]
-                    probs = batch_probs[i] if i < len(batch_probs) else None
-                    
-                    # Expand node with evaluated probabilities
-                    try:
-                        legal_actions = node.state.legal_actions()
-                        for action in legal_actions:
-                            if action not in node.children and probs is not None:
-                                next_state = node.state.clone()
-                                next_state.apply_action(action)
-                                node.children[action] = Node(
-                                    state=next_state,
-                                    prior=probs[action].item(),
-                                    parent=node,
-                                    root_player=node.root_player
-                                )
-                    except Exception as e:
-                        print(f"Error expanding node: {e}")
+                        print(f"Error in batch evaluation: {e}")
                         continue
                     
-                    # Backpropagate value
-                    for path_node in reversed(search_path):
-                        path_node.visit_count += 1
-                        path_node.total_value += value
-                        path_node.mean_value = path_node.total_value / path_node.visit_count
-                        
-                        # Flip value for opponent's perspective
-                        value = -value
+                    # Expansion and backpropagation for each leaf
+                    for i, (root_idx, node, search_path) in enumerate(current_leaves):
+                        if i >= len(batch_values):
+                            continue
+                            
+                        try:
+                            value = batch_values[i].item()
+                            probs = batch_probs[i]
+                            
+                            # Expand node with evaluated probabilities
+                            legal_actions = node.state.legal_actions()
+                            for action in legal_actions:
+                                if action not in node.children and probs is not None:
+                                    next_state = node.state.clone()
+                                    next_state.apply_action(action)
+                                    node.children[action] = Node(
+                                        state=next_state,
+                                        prior=probs[action].item(),
+                                        parent=node,
+                                        root_player=node.root_player
+                                    )
+                                    
+                            # Backpropagate value through the tree
+                            for path_node in reversed(search_path):
+                                path_node.visit_count += 1
+                                path_node.total_value += value
+                                path_node.mean_value = path_node.total_value / path_node.visit_count
+                                
+                                # Flip value for opponent's perspective
+                                value = -value
+                        except Exception as e:
+                            print(f"Error in expansion/backpropagation: {e}")
             
-            # Select best action from root
-            if not root.children:
-                # If no children, return a random legal action
-                legal_actions = root.state.legal_actions()
-                if legal_actions:
-                    return np.random.choice(legal_actions)
-                return 0  # Fallback
+            if num_states > 1:
+                elapsed = time.time() - start_time
+                print(f"Completed batch MCTS search in {elapsed:.2f}s ({elapsed/num_states:.3f}s per state)")
                 
-            # Use visit count to determine best action (most robust)
-            best_action = None
-            most_visits = -1
-            
-            for action, child in root.children.items():
-                if child.visit_count > most_visits:
-                    most_visits = child.visit_count
-                    best_action = action
+            # Select best action for each root based on visit counts
+            best_actions = []
+            for root in roots:
+                if not root.children:
+                    # If no children, return a random legal action
+                    legal_actions = root.state.legal_actions()
+                    if legal_actions:
+                        best_actions.append(np.random.choice(legal_actions))
+                    else:
+                        best_actions.append(0)  # Fallback
+                else:
+                    # Use visit count to determine best action
+                    best_action = None
+                    most_visits = -1
                     
-            if best_action is None:
-                # Final fallback
-                legal_actions = root.state.legal_actions()
-                if legal_actions:
-                    return np.random.choice(legal_actions)
-                return 0
-                
-            return best_action
+                    for action, child in root.children.items():
+                        if child.visit_count > most_visits:
+                            most_visits = child.visit_count
+                            best_action = action
+                            
+                    best_actions.append(best_action if best_action is not None else 0)
+            
+            return best_actions
             
         except Exception as e:
+            print(f"MCTS batch search error: {e}")
+            # Return random legal actions as fallback
+            return [self._get_random_action(state) for state in states]
+    
+    def _get_random_action(self, state):
+        """Get a random legal action for the given state."""
+        try:
+            legal_actions = state.legal_actions()
+            if legal_actions:
+                return np.random.choice(legal_actions)
+        except:
+            pass
+        return 0
+        
+    def search(self, state):
+        """Single state search - now implemented as a wrapper around batch_search"""
+        try:
+            return self.batch_search([state])[0]
+        except Exception as e:
             print(f"MCTS search error: {e}")
-            # Fallback to returning a legal random action
-            try:
-                legal_actions = state.legal_actions()
-                if legal_actions:
-                    return np.random.choice(legal_actions)
-            except:
-                pass
-            return 0  # Last fallback
+            return self._get_random_action(state)
 
 
 class MCTSPPO(PPO):
@@ -543,45 +596,66 @@ class MCTSPPO(PPO):
                         all_actions, all_values, all_log_probs = self.policy(obs_dict)
                     
                     all_actions = all_actions.cpu().numpy()
+                    
+                    # Identify which environments need MCTS
+                    mcts_indices = [e for i, e in enumerate(acting_indices) 
+                                   if e in agent_turn_indices and use_mcts_in_training and self.policy.mcts is not None]
+                    
+                    # If we have environments that need MCTS, process them in parallel
+                    if mcts_indices:
+                        try:
+                            # Get all states from these environments
+                            env_states = env.get_attr('state', indices=mcts_indices)
+                            
+                            # Run batch MCTS search on all states at once
+                            mcts_actions = self.policy.mcts.batch_search(env_states)
+                            
+                            # Process MCTS results for each environment
+                            for idx, e in enumerate(mcts_indices):
+                                if idx < len(mcts_actions):
+                                    # Use the MCTS action
+                                    actions[e] = mcts_actions[idx]
+                                    
+                                    # Find position in the original acting_indices list
+                                    pos = acting_indices.index(e)
+                                    
+                                    # Re-evaluate to get value and log_prob
+                                    single_obs = {
+                                        'board': board_tensor[pos:pos+1],
+                                        'action_mask': mask_tensor[pos:pos+1]
+                                    }
+                                    
+                                    with torch.no_grad():
+                                        _, values, _ = self.policy(single_obs)
+                                        action_tensor = torch.tensor([mcts_actions[idx]], device=self.device)
+                                        _, log_probs, _ = self.policy.evaluate_actions(single_obs, action_tensor)
+                                    
+                                    batch_values[e] = values[0]
+                                    if log_probs.dim() == 0:
+                                        batch_log_probs[e] = log_probs
+                                    else:
+                                        batch_log_probs[e] = log_probs[0]
+                                    
+                                    # Record position for rollout buffer
+                                    self.last_agent_step[e] = rollout_buffer.pos
+                        except Exception as mcts_ex:
+                            print(f"Error using batch MCTS: {mcts_ex}, falling back to policy")
+                            # For any environments that failed, use regular policy actions
+                            for e in mcts_indices:
+                                pos = acting_indices.index(e)
+                                actions[e] = all_actions[pos]
+                                batch_values[e] = all_values[pos]
+                                batch_log_probs[e] = all_log_probs[pos]
+                    
+                    # For all non-MCTS environments, use regular policy
                     for i, e in enumerate(acting_indices):
-                        # If this is an agent turn and MCTS is enabled, use MCTS for action selection
-                        if e in agent_turn_indices and use_mcts_in_training and self.policy.mcts is not None:
-                            try:
-                                # Get the state from the environment for MCTS
-                                env_state = env.get_attr('state', indices=[e])[0]
-                                # Run MCTS search to get a single action
-                                mcts_action = self.policy.mcts.search(env_state)
-                                actions[e] = mcts_action
-                                
-                                # Re-evaluate the action to get value and log_prob
-                                single_obs = {
-                                    'board': board_tensor[i:i+1],
-                                    'action_mask': mask_tensor[i:i+1]
-                                }
-                                with torch.no_grad():
-                                    _, values, _ = self.policy(single_obs)
-                                    action_tensor = torch.tensor([mcts_action], device=self.device)
-                                    _, log_probs, _ = self.policy.evaluate_actions(single_obs, action_tensor)
-                                batch_values[e] = values[0]
-                                # Make sure log_probs is the right shape
-                                if log_probs.dim() == 0:
-                                    batch_log_probs[e] = log_probs
-                                else:
-                                    batch_log_probs[e] = log_probs[0]
-                            except Exception as mcts_ex:
-                                print(f"Error using MCTS in training: {mcts_ex}, falling back to policy")
-                                # Fallback to regular policy if MCTS fails
-                                actions[e] = all_actions[i]
-                                batch_values[e] = all_values[i]
-                                batch_log_probs[e] = all_log_probs[i]
-                        else:
-                            # Regular policy action for opponent turns or when MCTS is disabled
-                            actions[e] = all_actions[i]
+                        if e not in mcts_indices:
+                            actions[e] = all_actions[i] 
                             batch_values[e] = all_values[i]
                             batch_log_probs[e] = all_log_probs[i]
-                        
-                        # Always record position for both sides, not just agent
-                        self.last_agent_step[e] = rollout_buffer.pos
+                            
+                            # Record position for rollout buffer
+                            self.last_agent_step[e] = rollout_buffer.pos
                 except Exception as ex:
                     print(f"Error in policy evaluation: {ex}")
                     for e in acting_indices:
