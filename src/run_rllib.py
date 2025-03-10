@@ -177,6 +177,7 @@ def train(args):
             "_experimental_enable_new_api_stack": False,
             "_disable_execution_plan_api": True,
             "_skip_validate_config": True,
+            "enable_rl_module_and_learner": False
         },
     )
     
