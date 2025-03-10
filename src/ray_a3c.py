@@ -82,6 +82,16 @@ class A3CActor:
         # Statistics
         self.total_steps = 0
         self.episode_rewards = deque(maxlen=100)
+        
+        # Game statistics
+        self.game_outcomes = {
+            "white_wins": 0,
+            "black_wins": 0,
+            "draws": 0,
+            "games_completed": 0,
+            "move_counts": []  # Track number of moves per game
+        }
+        self.current_game_moves = [0] * len(self.envs)
     
     def get_weights(self):
         """Return model weights as numpy arrays"""
@@ -230,6 +240,9 @@ class A3CActor:
                     next_obs, reward, terminated, truncated, info = env.step(batch_actions[i])
                     done = terminated or truncated
                     
+                    # Track game moves
+                    self.current_game_moves[i] += 1
+                    
                     next_obs_list.append(next_obs)
                     reward_list.append(reward)
                     done_list.append(done)
@@ -237,6 +250,19 @@ class A3CActor:
                     
                     # Track statistics
                     self.total_steps += 1
+                    
+                    # Record game outcomes
+                    if done:
+                        self.game_outcomes["games_completed"] += 1
+                        self.game_outcomes["move_counts"].append(self.current_game_moves[i])
+                        self.current_game_moves[i] = 0
+                        
+                        if info.get('white_won', False):
+                            self.game_outcomes["white_wins"] += 1
+                        elif info.get('black_won', False):
+                            self.game_outcomes["black_wins"] += 1
+                        else:
+                            self.game_outcomes["draws"] += 1
                     
                     # Record episode rewards
                     if done:
@@ -417,10 +443,27 @@ class A3CActor:
     
     def get_stats(self):
         """Return current statistics"""
+        # Calculate win rates
+        total_games = max(1, self.game_outcomes["games_completed"])
+        white_win_rate = self.game_outcomes["white_wins"] / total_games * 100
+        black_win_rate = self.game_outcomes["black_wins"] / total_games * 100
+        draw_rate = self.game_outcomes["draws"] / total_games * 100
+        
+        # Calculate average moves per game
+        avg_moves = np.mean(self.game_outcomes["move_counts"]) if self.game_outcomes["move_counts"] else 0
+        
         return {
             "steps": self.total_steps,
             "mean_reward": np.mean(self.episode_rewards) if self.episode_rewards else 0,
-            "num_episodes": len(self.episode_rewards)
+            "num_episodes": len(self.episode_rewards),
+            "white_wins": self.game_outcomes["white_wins"],
+            "black_wins": self.game_outcomes["black_wins"],
+            "draws": self.game_outcomes["draws"],
+            "white_win_rate": white_win_rate,
+            "black_win_rate": black_win_rate,
+            "draw_rate": draw_rate,
+            "avg_moves_per_game": avg_moves,
+            "games_completed": self.game_outcomes["games_completed"]
         }
 
 # Learner class - updates global model using gradients from actors
@@ -563,7 +606,83 @@ class A3CTrainer:
         self.start_time = time.time()
         self.total_steps = 0
         self.updates = 0
+        
+        # Game statistics
+        self.game_stats = {
+            "white_wins": 0,
+            "black_wins": 0,
+            "draws": 0,
+            "games_completed": 0,
+            "avg_moves_per_game": 0
+        }
+        
+        # Create metrics directory
+        os.makedirs("data/metrics", exist_ok=True)
+        self.metrics_file = os.path.join("data/metrics", "training_metrics.csv")
+        
+        # Initialize metrics file with header if it doesn't exist
+        if not os.path.exists(self.metrics_file):
+            with open(self.metrics_file, "w") as f:
+                f.write("timestamp,steps,updates,white_wins,black_wins,draws,white_win_rate,black_win_rate,draw_rate,avg_moves_per_game,games_completed,mean_reward\n")
     
+    def update_game_stats(self, actor_stats_list):
+        """Update aggregated game statistics from actor stats"""
+        # Reset counters
+        white_wins = 0
+        black_wins = 0
+        draws = 0
+        games_completed = 0
+        move_counts = []
+        
+        # Aggregate stats from all actors
+        for stats in actor_stats_list:
+            white_wins += stats.get("white_wins", 0)
+            black_wins += stats.get("black_wins", 0)
+            draws += stats.get("draws", 0)
+            games_completed += stats.get("games_completed", 0)
+            if "avg_moves_per_game" in stats and stats["avg_moves_per_game"] > 0:
+                move_counts.append(stats["avg_moves_per_game"])
+        
+        # Update global stats
+        self.game_stats["white_wins"] = white_wins
+        self.game_stats["black_wins"] = black_wins
+        self.game_stats["draws"] = draws
+        self.game_stats["games_completed"] = games_completed
+        self.game_stats["avg_moves_per_game"] = np.mean(move_counts) if move_counts else 0
+        
+        # Log to file
+        self.log_metrics_to_file()
+        
+    def log_metrics_to_file(self):
+        """Log metrics to CSV file"""
+        # Calculate rates
+        total_games = max(1, self.game_stats["games_completed"])
+        white_win_rate = self.game_stats["white_wins"] / total_games * 100
+        black_win_rate = self.game_stats["black_wins"] / total_games * 100
+        draw_rate = self.game_stats["draws"] / total_games * 100
+        
+        # Get mean reward from learner
+        mean_reward = self.learner.metrics.summary().get("mean_reward", 0)
+        
+        # Write to file
+        with open(self.metrics_file, "a") as f:
+            f.write(f"{time.time()},{self.total_steps},{self.updates},{self.game_stats['white_wins']},{self.game_stats['black_wins']},{self.game_stats['draws']},{white_win_rate},{black_win_rate},{draw_rate},{self.game_stats['avg_moves_per_game']},{self.game_stats['games_completed']},{mean_reward}\n")
+    
+    def print_game_stats(self):
+        """Print game statistics to console"""
+        total_games = max(1, self.game_stats["games_completed"])
+        white_win_rate = self.game_stats["white_wins"] / total_games * 100
+        black_win_rate = self.game_stats["black_wins"] / total_games * 100
+        draw_rate = self.game_stats["draws"] / total_games * 100
+        
+        print("\n===== Game Statistics =====")
+        print(f"Games completed: {self.game_stats['games_completed']}")
+        print(f"White wins: {self.game_stats['white_wins']} ({white_win_rate:.2f}%)")
+        print(f"Black wins: {self.game_stats['black_wins']} ({black_win_rate:.2f}%)")
+        print(f"Draws: {self.game_stats['draws']} ({draw_rate:.2f}%)")
+        print(f"Avg moves per game: {self.game_stats['avg_moves_per_game']:.1f}")
+        print("==========================\n")
+
     def train(self):
         """Run training loop"""
         print(f"Starting A3C training with {len(self.actors)} actors")
@@ -571,6 +690,11 @@ class A3CTrainer:
         
         # Get initial weights
         weights = self.learner.get_weights()
+        
+        # Get initial stats from all actors
+        stats_futures = [actor.get_stats.remote() for actor in self.actors]
+        initial_stats = ray.get(stats_futures)
+        self.update_game_stats(initial_stats)
         
         # Training loop
         try:
@@ -601,12 +725,23 @@ class A3CTrainer:
                 
                 # Log progress
                 if self.updates % self.config["log_interval"] == 0:
+                    # Get updated stats from all actors
+                    stats_futures = [actor.get_stats.remote() for actor in self.actors]
+                    all_stats = ray.get(stats_futures)
+                    self.update_game_stats(all_stats)
+                    
+                    # Calculate training speed
                     elapsed = time.time() - self.start_time
                     steps_per_sec = self.total_steps / elapsed if elapsed > 0 else 0
                     
+                    # Print progress
                     print(f"Update {self.updates}, Steps: {self.total_steps}, "
                           f"Steps/sec: {steps_per_sec:.1f}, "
                           f"Mean reward: {metrics.get('mean_reward', 0):.2f}")
+                    
+                    # Print game stats every 5 log intervals
+                    if self.updates % (self.config["log_interval"] * 5) == 0:
+                        self.print_game_stats()
                 
                 # Save model checkpoint
                 if self.updates % self.config["save_interval"] == 0:
@@ -615,6 +750,23 @@ class A3CTrainer:
                         f"a3c_chess_model_{self.total_steps}_steps.pt"
                     )
                     self.learner.save_model(checkpoint_path)
+                    print(f"Saved model checkpoint to {checkpoint_path}")
+                    
+                    # Also save a CSV with current game stats
+                    stats_path = os.path.join(
+                        self.config["save_dir"],
+                        f"game_stats_{self.total_steps}_steps.csv"
+                    )
+                    with open(stats_path, "w") as f:
+                        f.write("metric,value\n")
+                        f.write(f"white_wins,{self.game_stats['white_wins']}\n")
+                        f.write(f"black_wins,{self.game_stats['black_wins']}\n")
+                        f.write(f"draws,{self.game_stats['draws']}\n")
+                        f.write(f"games_completed,{self.game_stats['games_completed']}\n")
+                        f.write(f"white_win_rate,{self.game_stats['white_wins']/max(1,self.game_stats['games_completed'])*100}\n")
+                        f.write(f"black_win_rate,{self.game_stats['black_wins']/max(1,self.game_stats['games_completed'])*100}\n")
+                        f.write(f"draw_rate,{self.game_stats['draws']/max(1,self.game_stats['games_completed'])*100}\n")
+                        f.write(f"avg_moves_per_game,{self.game_stats['avg_moves_per_game']}\n")
         
         except KeyboardInterrupt:
             print("Training interrupted.")
@@ -626,14 +778,14 @@ class A3CTrainer:
         # Get final stats from all actors
         stats_futures = [actor.get_stats.remote() for actor in self.actors]
         all_stats = ray.get(stats_futures)
+        self.update_game_stats(all_stats)
         
-        # Report final statistics
-        total_actor_steps = sum(stat["steps"] for stat in all_stats)
-        mean_reward = np.mean([stat["mean_reward"] for stat in all_stats if stat["num_episodes"] > 0])
+        # Print final statistics
+        self.print_game_stats()
         
         print("\nTraining completed:")
-        print(f"Total steps: {total_actor_steps}")
-        print(f"Mean reward: {mean_reward:.2f}")
+        print(f"Total steps: {self.total_steps}")
+        print(f"Mean reward: {self.learner.metrics.summary().get('mean_reward', 0):.2f}")
         print(f"Total updates: {self.updates}")
         print(f"Total time: {time.time() - self.start_time:.1f} seconds")
     
