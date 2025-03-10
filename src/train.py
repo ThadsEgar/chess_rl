@@ -281,18 +281,16 @@ def parse_arguments():
                         help='Total number of timesteps to train for')
     parser.add_argument('--save_freq', type=int, default=50000,
                         help='Frequency (in timesteps) to save model checkpoints')
-    parser.add_argument('--learning_rate', type=float, default=1e-5,
-                        help='Initial learning rate for the optimizer (default: 1e-5)')
+    parser.add_argument('--learning_rate', type=float, default=5e-5,
+                        help='Initial learning rate for the optimizer (default: 5e-5)')
     parser.add_argument('--n_epochs', type=int, default=4,
                         help='Number of epochs when optimizing the surrogate loss (default: 4)')
     parser.add_argument('--batch_size', type=int, default=4096,
                         help='Batch size for training (default: 4096 for GPU efficiency)')
-    parser.add_argument('--clip_range', type=float, default=0.1,
-                        help='Clipping parameter for PPO (default: 0.1 for more conservative updates)')
-    parser.add_argument('--max_grad_norm', type=float, default=0.3,
-                        help='Maximum norm for gradients (default: 0.3 for more stable updates)')
-    parser.add_argument('--target_kl', type=float, default=0.03,
-                        help='Target KL divergence threshold for early stopping (default: 0.03)')
+    parser.add_argument('--clip_range', type=float, default=0.2,
+                        help='Clipping parameter for PPO (default: 0.2 for faster learning)')
+    parser.add_argument('--max_grad_norm', type=float, default=None,
+                        help='Maximum norm for gradients (default: None - no clipping)')
     parser.add_argument('--simple_test', action='store_true',
                         help='Use simplified chess positions for quick learning verification')
     parser.add_argument('--balanced_test', action='store_true',
@@ -393,8 +391,7 @@ def main():
         n_epochs=args.n_epochs,
         batch_size=args.batch_size,
         clip_range=args.clip_range,
-        max_grad_norm=args.max_grad_norm,
-        target_kl=args.target_kl
+        max_grad_norm=args.max_grad_norm
     )
     
     # Set up callbacks

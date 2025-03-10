@@ -661,7 +661,7 @@ class MCTSPPO(PPO):
         return True
 
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=0.5, use_layer_norm=True, target_kl=0.015):
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -681,9 +681,18 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
     print(f"Training with {n_envs} environments, {n_steps} steps per environment")
     print(f"Total steps per iteration: {total_steps}, batch size: {batch_size}")
     print(f"Initial learning rate: {learning_rate}, epochs: {n_epochs}, clip_range: {clip_range}")
-    print(f"Max gradient norm: {max_grad_norm}")
-    print(f"Using normalization: NO (removed for stability)")
+    
+    if max_grad_norm is not None:
+        print(f"Max gradient norm: {max_grad_norm}")
+    else:
+        print("Gradient clipping: Disabled (for faster learning)")
+        
     print(f"Using learning rate schedule: YES (linear decay)")
+    
+    # Use a higher learning rate for faster training
+    if learning_rate > 8e-5 and not checkpoint:
+        print(f"NOTE: Reducing initial learning rate to 8e-5 for stability")
+        learning_rate = 8e-5
     
     # Create a linear learning rate schedule
     def linear_schedule(progress_remaining):
@@ -696,45 +705,37 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
         # Start with the specified learning rate and decrease to 10% of initial value
         return progress_remaining * learning_rate + (1 - progress_remaining) * (learning_rate * 0.1)
     
+    # Common kwargs for both model creation paths
+    model_kwargs = {
+        'env': env,
+        'policy': CNNMCTSActorCriticPolicy,
+        'tensorboard_log': tensorboard_log,
+        'verbose': 1,
+        'learning_rate': linear_schedule,
+        'n_steps': n_steps,
+        'batch_size': batch_size,
+        'n_epochs': n_epochs,
+        'gamma': 0.99,
+        'device': device,
+        'clip_range': clip_range,
+        'ent_coef': 0.01,
+        'vf_coef': 0.5,
+        'policy_kwargs': policy_kwargs,
+    }
+    
+    # Add max_grad_norm only if it's not None
+    if max_grad_norm is not None:
+        model_kwargs['max_grad_norm'] = max_grad_norm
+    
     if checkpoint:
         print(f'Checkpoint: {checkpoint} loaded')
         model = MCTSPPO.load(
-            checkpoint, 
-            env=env, 
-            policy=CNNMCTSActorCriticPolicy,
-            tensorboard_log=tensorboard_log, 
-            verbose=1,
-            learning_rate=linear_schedule,
-            n_steps=n_steps,        # Steps to collect per environment
-            batch_size=batch_size,  # Batch size for updates
-            n_epochs=n_epochs,      # Number of passes through the batch
-            gamma=0.99,
-            device=device,
-            clip_range=clip_range,
-            ent_coef=0.01,          # Reduced entropy coefficient for more stable updates
-            vf_coef=0.5,
-            max_grad_norm=max_grad_norm,  # Add gradient clipping
-            policy_kwargs=policy_kwargs,
-            target_kl=target_kl,    # Add early stopping based on KL divergence
+            checkpoint,
+            **model_kwargs
         )
     else:
         model = MCTSPPO(
-            CNNMCTSActorCriticPolicy,
-            env,
-            tensorboard_log=tensorboard_log,
-            policy_kwargs=policy_kwargs,
-            verbose=1,
-            learning_rate=linear_schedule,
-            n_steps=n_steps,
-            batch_size=batch_size,
-            n_epochs=n_epochs, 
-            gamma=0.99,
-            device=device,
-            clip_range=clip_range,
-            ent_coef=0.01,          # Reduced entropy coefficient for more stable updates 
-            vf_coef=0.5,
-            max_grad_norm=max_grad_norm,  # Add gradient clipping
-            target_kl=target_kl,    # Add early stopping based on KL divergence
+            **model_kwargs
         )
     
     return model
