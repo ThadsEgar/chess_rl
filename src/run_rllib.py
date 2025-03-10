@@ -287,10 +287,15 @@ def train(args):
             # Get info dict from the episode
             info = episode.last_info_for()
             
+            # Debug: Print episode length and termination reason
+            episode_steps = episode.length
+            print(f"Episode ended after {episode_steps} steps. Info: {info}")
+            
             # Only count completed games (where we have a game_outcome)
             # This avoids counting episodes that end for other reasons
             if "game_outcome" in info:
                 game_outcome = info["game_outcome"]
+                print(f"✓ GAME COMPLETED: {game_outcome}")
                 
                 # Initialize metrics
                 episode.custom_metrics["white_win"] = 0.0
@@ -309,6 +314,8 @@ def train(args):
                     episode.custom_metrics["draw"] = 1.0
                 
                 self.total_games += 1
+            else:
+                print("✘ GAME NOT COMPLETED: Episode ended without a game outcome")
             
             # Calculate win/draw percentages
             if self.total_games > 0:
@@ -393,8 +400,16 @@ def train(args):
             "log_level": "INFO",  # Changed from DEBUG to reduce verbosity
             # Worker configuration to ensure observation space is correctly initialized
             "remote_worker_envs": False,
-            "restart_failed_env_runners": True,
-            "restart_failed_sub_environments": True
+            "recreate_failed_workers": True,
+            "restart_failed_sub_environments": True,
+            
+            # Increase episode length limits to allow games to complete
+            "horizon": 1000,  # Maximum steps per episode - chess games need time to finish
+            "soft_horizon": False,  # Don't reset environments mid-game
+            
+            # Rollout settings to encourage game completion
+            "rollout_fragment_length": 200,  # Collect this many steps per rollout
+            "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
         },
     )
     

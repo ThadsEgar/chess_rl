@@ -251,6 +251,7 @@ class ChessEnv(gym.Env):
         self.done = False
         self.reward = 0
         self.move_count = 0
+        self.max_moves = 500  # Limit games to 500 moves (1000 plies) to prevent infinite games
     
     def reset(self, seed=None, options=None):
         """Reset the environment to start a new game."""
@@ -325,6 +326,14 @@ class ChessEnv(gym.Env):
             if self.board.is_check():
                 reward += 0.01
                 
+            # Check for move limit exceeded (draw)
+            if self.move_count >= self.max_moves:
+                self.done = True
+                reward = 0.0
+                info["draw"] = True
+                info["game_outcome"] = "draw"
+                info["termination_reason"] = "move_limit_exceeded"
+                
             # Update state
             self.state = ChessState(self.board)
             self.reward = reward
@@ -332,6 +341,19 @@ class ChessEnv(gym.Env):
             # Add move count to info
             info["move_count"] = self.move_count
             info["current_player"] = 1 if self.board.turn else 0
+            
+            # Always include game state info
+            if self.done:
+                info["game_completed"] = True
+                if not info.get("termination_reason"):
+                    if info.get("white_won"):
+                        info["termination_reason"] = "white_checkmate"
+                    elif info.get("black_won"):
+                        info["termination_reason"] = "black_checkmate"
+                    elif info.get("draw"):
+                        info["termination_reason"] = "draw"
+            else:
+                info["game_completed"] = False
             
             # Follow new Gymnasium API: (observation, reward, terminated, truncated, info)
             return self._get_obs(), reward, self.done, False, info
