@@ -13,7 +13,8 @@ import gymnasium as gym
 from pathlib import Path
 import ray
 from ray import tune
-from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.algorithms.ppo import PPO
+from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from ray.rllib.models import ModelCatalog
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.framework import try_import_torch
@@ -136,12 +137,12 @@ def train(args):
     # Register the custom model
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
     
-    # Configure the algorithm
+    # Configure the algorithm - use AlgorithmConfig directly
     config = (
-        PPOConfig()
+        AlgorithmConfig()
         .environment(create_rllib_chess_env)
         .framework("torch")
-        .rollouts(num_rollout_workers=args.num_workers)
+        .env_runners(num_env_runners=args.num_workers)
         .training(
             model={
                 "custom_model": "chess_masked_model",
@@ -165,28 +166,38 @@ def train(args):
     )
     
     # Add checkpoint config
-    config.checkpointing(
+    config = config.checkpointing(
         checkpoint_frequency=args.checkpoint_interval,
         checkpoint_at_end=True,
         checkpoint_dir=args.checkpoint_dir
     )
     
     # Run training
-    results = tune.run(
-        "PPO",
-        config=config.to_dict(),
-        stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=args.checkpoint_interval,
-        checkpoint_at_end=True,
-        local_dir=args.checkpoint_dir,
-        verbose=1
-    )
+    algorithm = PPO(config=config)
     
-    # Save final checkpoint path
-    best_checkpoint = results.best_checkpoint
-    print(f"Best checkpoint: {best_checkpoint}")
+    # Train for the specified number of iterations
+    for i in range(args.max_iterations):
+        result = algorithm.train()
+        
+        # Log some useful metrics
+        if i % 5 == 0:  # Log every 5 iterations
+            episode_reward_mean = result.get("episode_reward_mean", 0)
+            episode_len_mean = result.get("episode_len_mean", 0)
+            total_timesteps = result.get("timesteps_total", 0)
+            
+            print(f"Iteration {i}: reward={episode_reward_mean:.3f}, " +
+                  f"length={episode_len_mean:.1f}, total_steps={total_timesteps}")
+        
+        # Save checkpoint periodically
+        if i % args.checkpoint_interval == 0 or i == args.max_iterations - 1:
+            checkpoint_path = algorithm.save(args.checkpoint_dir)
+            print(f"Checkpoint saved to {checkpoint_path}")
     
-    return best_checkpoint
+    # Save final checkpoint
+    final_checkpoint = algorithm.save(args.checkpoint_dir)
+    print(f"Final checkpoint saved to {final_checkpoint}")
+    
+    return final_checkpoint
 
 
 def evaluate(args):
