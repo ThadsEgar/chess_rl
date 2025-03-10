@@ -277,8 +277,8 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=1,
-        # Add metric and mode for best_checkpoint
-        metric="episode_reward_mean",
+        # Update metric name to match what's actually reported in the results
+        metric="env_runners/episode_reward_mean", 
         mode="max",
         config={
             "env": "chess_env",
