@@ -14,8 +14,8 @@ from pathlib import Path
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO
-from ray.rllib.models import ModelCatalog
-from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
+from ray.rllib.core.rl_module.rl_module import RLModule
+from ray.rllib.core.models.torch.torch_distributions import TorchCategorical
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_utils import FLOAT_MAX
 
@@ -24,18 +24,17 @@ from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 
 torch, nn = try_import_torch()
 
-class ChessMaskedModel(TorchModelV2, nn.Module):
-    """Custom model for Chess that supports action masking"""
-    def __init__(self, obs_space, action_space, num_outputs, model_config, name):
-        TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
-        nn.Module.__init__(self)
+class ChessRLModule(RLModule):
+    """Custom RLModule for Chess that supports action masking"""
+    def __init__(self, config):
+        super().__init__(config)
         
-        # Get feature dimensions from observation space
-        assert isinstance(obs_space, gym.spaces.Dict)
-        self.board_shape = obs_space["board"].shape
-        self.action_mask_shape = obs_space["action_mask"].shape
-        self.board_channels = self.board_shape[0]  # 13 channels (6 piece types x 2 colors + empty)
-        self.board_size = self.board_shape[1]  # 8x8 board
+        # Initialize action dist class
+        self.action_dist_cls = TorchCategorical
+        
+        # Get feature dimensions
+        self.board_channels = 13  # Number of channels in chess board representation
+        self.board_size = 8  # Size of chess board (8x8)
         
         # Feature extractor CNN
         self.features_extractor = nn.Sequential(
@@ -57,7 +56,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             nn.ReLU(),
             nn.Linear(512, 512),
             nn.ReLU(),
-            nn.Linear(512, num_outputs)
+            nn.Linear(512, 20480)  # Match the large action space we defined
         )
         
         # Value network (critic)
@@ -75,14 +74,23 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-        
-        # Current value estimate (needed for RLlib's TorchModelV2 API)
-        self._cur_value = None
     
-    def forward(self, input_dict, state, seq_lens):
-        """Forward pass of the model"""
+    def _forward_inference(self, batch):
+        """Forward pass for inference"""
+        return self._common_forward(batch)
+    
+    def _forward_exploration(self, batch):
+        """Forward pass for exploration"""
+        return self._common_forward(batch)
+    
+    def _forward_train(self, batch):
+        """Forward pass for training"""
+        return self._common_forward(batch)
+    
+    def _common_forward(self, batch):
+        """Common forward pass logic for all modes"""
         # Extract observations
-        obs = input_dict["obs"]
+        obs = batch["obs"]
         board = obs["board"].float()
         action_mask = obs["action_mask"].float()
         
@@ -98,15 +106,11 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
         inf_mask = torch.clamp(torch.log(action_mask), -FLOAT_MAX, FLOAT_MAX)
         masked_logits = logits + inf_mask
         
-        # Save value function output
-        self._cur_value = self.value_net(features).squeeze(1)
+        # Get value function estimate
+        values = self.value_net(features).squeeze(-1)
         
-        return masked_logits, state
-    
-    def value_function(self):
-        """Return the current value function estimate"""
-        assert self._cur_value is not None, "value function called before forward pass"
-        return self._cur_value
+        # Return both outputs
+        return {"action_dist_inputs": masked_logits, "values": values}
 
 
 def create_rllib_chess_env(config):
@@ -133,18 +137,19 @@ def train(args):
             include_dashboard=args.dashboard
         )
     
-    # Register the custom model
-    ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
-    
     # Create a config dictionary
     config = {
         "env": create_rllib_chess_env,
         "framework": "torch",
         "num_workers": args.num_workers,
         "num_gpus": 1 if args.device == "cuda" and not args.force_cpu else 0,
-        "model": {
-            "custom_model": "chess_masked_model",
-            "custom_model_config": {},
+        # RL Module configuration
+        "rl_module": {
+            "_disable_preprocessor_api": False,
+            "rl_module_spec": {
+                "module_class": ChessRLModule,
+                "config": {},
+            },
         },
         # PPO specific configs
         "gamma": 0.99,
