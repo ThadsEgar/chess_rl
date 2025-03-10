@@ -149,22 +149,30 @@ def get_game_result(state):
             result['stalemate'] = True
     return result
 
-def create_simple_endgame():
-    """Create a simple endgame position with white to move and checkmate in 1 or 2 moves."""
-    # Simple king and queen vs king endgame
-    # White king on e1, white queen on d1, black king on e8
-    fen = "4k3/8/8/8/8/8/8/3QK3 w - - 0 1"
-    state = pyspiel.loads_fen(fen, "chess")
+def create_simple_endgame(random_side=True):
+    """Create simple endgame positions with checkmate in 1-3 moves for either white or black."""
+    # Determine which side has the advantage (50/50 chance)
+    white_advantage = np.random.choice([True, False]) if random_side else True
+    
+    if white_advantage:
+        # Position 1: White queen and king vs black king (white to move and win)
+        fen = "4k3/8/8/8/8/8/8/3QK3 w - - 0 1"
+    else:
+        # Position 2: Black queen and king vs white king (black to move and win)
+        fen = "3qk3/8/8/8/8/8/8/4K3 b - - 0 1"
+    
+    state = pyspiel.load_game_as_turn_based("chess").new_initial_state(fen)
     return state
 
 class ChessEnv(gym.Env):
     metadata = {"render.modes": ["human"]}
     
-    def __init__(self, simple_test=False):
+    def __init__(self, simple_test=False, white_advantage=None):
         super(ChessEnv, self).__init__()
         self.game = pyspiel.load_game("chess")
         self.state = self.game.new_initial_state()
         self.simple_test = simple_test  # Flag for simple test mode
+        self.white_advantage = white_advantage  # Override random side selection if specified
         self.action_space = spaces.Discrete(self.game.num_distinct_actions())
         
         self.piece_channels = 13  # 12 piece channels + player channel
@@ -189,7 +197,16 @@ class ChessEnv(gym.Env):
         super().reset(seed=seed)
         self.move_count = 0
         if self.simple_test:
-            self.state = create_simple_endgame()
+            random_side = self.white_advantage is None
+            self.state = create_simple_endgame(random_side=random_side)
+            if not random_side and self.white_advantage is not None:
+                # Force specific side to have advantage based on parameter
+                if self.white_advantage:
+                    self.state = create_simple_endgame(random_side=False)  # white advantage
+                else:
+                    # Black advantage position
+                    fen = "3qk3/8/8/8/8/8/8/4K3 b - - 0 1"
+                    self.state = pyspiel.load_game_as_turn_based("chess").new_initial_state(fen)
         else:
             self.state = self.game.new_initial_state()
         self.last_move = None
@@ -363,9 +380,9 @@ class ActionMaskWrapper(gym.Wrapper):
         return {'board': obs, 'action_mask': action_mask}, reward, terminated, truncated, info
 
 # Modify the environment creation function in src/train.py
-def make_env(rank, seed=0, simple_test=False):
+def make_env(rank, seed=0, simple_test=False, white_advantage=None):
     def _init():
-        env = ChessEnv(simple_test=simple_test)
+        env = ChessEnv(simple_test=simple_test, white_advantage=white_advantage)
         env = ActionMaskWrapper(env)
         env.reset(seed=seed + rank)
         return env

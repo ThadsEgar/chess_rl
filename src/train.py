@@ -13,9 +13,9 @@ import re
 import sys
 import argparse
 
-def make_env(rank, seed=0, simple_test=False):
+def make_env(rank, seed=0, simple_test=False, white_advantage=None):
     def _init():
-        env = ChessEnv()
+        env = ChessEnv(simple_test=simple_test, white_advantage=white_advantage)
         env = ActionMaskWrapper(env)
         env.reset(seed=seed + rank)
         return env
@@ -295,6 +295,8 @@ def parse_arguments():
                         help='Target KL divergence threshold for early stopping (default: 0.03)')
     parser.add_argument('--simple_test', action='store_true',
                         help='Use simplified chess positions for quick learning verification')
+    parser.add_argument('--balanced_test', action='store_true',
+                        help='Run balanced training to ensure both white and black learn equally')
     return parser.parse_args()
 
 def main():
@@ -319,8 +321,16 @@ def main():
     # Set up multiprocessing
     multiprocessing.set_start_method('spawn', force=True)
     
-    # Create environment functions
-    envs = [make_env(i, simple_test=args.simple_test) for i in range(n_envs)]
+    # For balanced testing, create half white-advantage and half black-advantage environments
+    if args.balanced_test and args.simple_test:
+        half_envs = n_envs // 2
+        white_envs = [make_env(i, simple_test=True, white_advantage=True) for i in range(half_envs)]
+        black_envs = [make_env(i + half_envs, simple_test=True, white_advantage=False) for i in range(n_envs - half_envs)]
+        envs = white_envs + black_envs
+        print(f"Created balanced test environment: {half_envs} white-advantage and {n_envs - half_envs} black-advantage positions")
+    else:
+        # Create regular environments
+        envs = [make_env(i, simple_test=args.simple_test) for i in range(n_envs)]
     
     # Create vectorized environment
     env = SubprocVecEnv(envs)
