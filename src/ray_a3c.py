@@ -522,10 +522,28 @@ class RolloutWorker:
                 self.buffer['obs'].append(self.current_obs)
                 
                 # Select action
-                action, value, log_prob = self.select_action(self.current_obs)
+                try:
+                    action, value, log_prob = self.select_action(self.current_obs)
+                except Exception as e:
+                    logger.error(f"Worker {self.worker_id}: Error selecting action: {str(e)}", exc_info=True)
+                    # Use a safe default action
+                    action, value, log_prob = 0, 0.0, 0.0
                 
                 # Step the environment
-                step_result = self.env.step(action)
+                try:
+                    step_result = self.env.step(action)
+                except Exception as e:
+                    logger.error(f"Worker {self.worker_id}: Error stepping environment: {str(e)}", exc_info=True)
+                    # Create a safe fallback
+                    if isinstance(self.current_obs, dict) and 'board' in self.current_obs:
+                        dummy_obs = {
+                            'board': self.current_obs['board'],
+                            'action_mask': np.ones(20480, dtype=np.float32)
+                        }
+                    else:
+                        dummy_obs = {'board': np.zeros((13, 8, 8), dtype=np.float32), 'action_mask': np.ones(20480, dtype=np.float32)}
+                    
+                    step_result = (dummy_obs, 0.0, True, {'error': str(e)})
                 
                 # Handle different return formats from environment step
                 if isinstance(step_result, tuple):
@@ -1126,13 +1144,53 @@ def train(args):
             
             # Process results as they come in
             for _ in range(len(workers)):
-                ready_ids, worker_tasks = ray.wait(worker_tasks, num_returns=1)
+                ready_ids, remaining_tasks = ray.wait(worker_tasks, num_returns=1)
                 
-                # Get the actual worker object reference, not the task
-                worker_ref = workers[int(np.where(np.array(worker_tasks) == ready_ids[0])[0])]
+                # Find the index of the completed task
+                completed_task_id = ready_ids[0]
+                
+                # Calculate the worker index
+                worker_index = None
+                for i, task in enumerate(worker_tasks):
+                    if task == completed_task_id:
+                        worker_index = i
+                        break
+                
+                # If we can't find the worker directly in the list, find by comparing string representations
+                if worker_index is None:
+                    task_id_str = str(completed_task_id)
+                    for i, task in enumerate(worker_tasks):
+                        if str(task) == task_id_str:
+                            worker_index = i
+                            break
+                
+                # Fallback: just use a valid worker index
+                if worker_index is None:
+                    worker_index = 0
+                    logger.warning(f"Could not find worker for task {completed_task_id}, using fallback worker")
+                
+                # Get the worker reference
+                worker_ref = workers[worker_index]
+                
+                # Update the worker tasks list with the remaining tasks
+                worker_tasks = remaining_tasks
                 
                 # Get results from the completed task
-                processed_buffer, complete_episode, metrics = ray.get(ready_ids[0])
+                try:
+                    processed_buffer, complete_episode, metrics = ray.get(ready_ids[0])
+                except Exception as e:
+                    logger.error(f"Error getting results from worker: {str(e)}", exc_info=True)
+                    # Create dummy results
+                    processed_buffer = {
+                        'obs': [],
+                        'actions': np.array([]),
+                        'returns': np.array([]),
+                        'advantages': np.array([]),
+                        'log_probs': np.array([]),
+                        'values': np.array([])
+                    }
+                    complete_episode = True
+                    metrics = {}
                 
                 # Skip if buffer is empty
                 if not processed_buffer or 'obs' not in processed_buffer or len(processed_buffer['obs']) == 0:
@@ -1140,7 +1198,12 @@ def train(args):
                     continue
                 
                 # Compute gradients using the same worker that collected the experience
-                gradients, loss_metrics = ray.get(worker_ref.compute_gradients.remote(processed_buffer))
+                try:
+                    gradients, loss_metrics = ray.get(worker_ref.compute_gradients.remote(processed_buffer))
+                except Exception as e:
+                    logger.error(f"Error computing gradients: {str(e)}", exc_info=True)
+                    # Skip this update
+                    continue
                 
                 # Update metrics with loss metrics
                 metrics.update(loss_metrics)
