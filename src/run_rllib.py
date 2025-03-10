@@ -112,7 +112,16 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
 def create_rllib_chess_env(config):
     """Factory function to create chess environment for RLlib"""
     env = ChessEnv()
+    
+    # First wrap with ActionMaskWrapper to add the action mask to observation
     env = ActionMaskWrapper(env)
+    
+    # Verify the observation space is a Dict with the correct structure
+    if not isinstance(env.observation_space, gym.spaces.Dict) or 'board' not in env.observation_space.spaces or 'action_mask' not in env.observation_space.spaces:
+        # If not, add ObservationDictWrapper to ensure proper Dict format
+        from src.ray_a3c import ObservationDictWrapper
+        env = ObservationDictWrapper(env)
+    
     return env
 
 
