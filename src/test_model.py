@@ -136,52 +136,13 @@ def main():
             # Model prediction
             try:
                 # The model expects a specific observation format
-                # Let's try to handle both dictionary and tensor formats
-                if isinstance(model.policy, type) and hasattr(model.policy, 'extract_features'):
-                    # If using a custom policy with extract_features method
-                    action, _ = model.predict(obs, deterministic=True)
-                else:
-                    # Try to convert the observation to the format the model expects
-                    try:
-                        # If the model expects a flattened tensor
-                        if isinstance(obs, dict):
-                            # Convert dictionary observation to tensor
-                            board = obs['board']
-                            action_mask = obs['action_mask']
-                            flat_obs = np.concatenate([board, action_mask])
-                            action, _ = model.predict(flat_obs, deterministic=True)
-                        else:
-                            # Already in the right format
-                            action, _ = model.predict(obs, deterministic=True)
-                    except Exception as inner_e:
-                        print(f"Error converting observation: {inner_e}")
-                        # Try one more approach - use the policy directly
-                        if hasattr(model, 'policy') and hasattr(model.policy, 'forward'):
-                            # Convert to tensor
-                            if isinstance(obs, dict):
-                                board_tensor = torch.as_tensor(obs['board']).unsqueeze(0).to(model.device)
-                                mask_tensor = torch.as_tensor(obs['action_mask']).unsqueeze(0).to(model.device)
-                                obs_dict = {'board': board_tensor, 'action_mask': mask_tensor}
-                                with torch.no_grad():
-                                    actions, _, _ = model.policy(obs_dict)
-                                action = actions.cpu().numpy()[0]
-                            else:
-                                obs_tensor = torch.as_tensor(obs).unsqueeze(0).to(model.device)
-                                with torch.no_grad():
-                                    actions, _, _ = model.policy(obs_tensor)
-                                action = actions.cpu().numpy()[0]
-                        else:
-                            raise inner_e
-                
-                if isinstance(action, np.ndarray):
-                    action = int(action.item())
+                # Predict the action using the model
+                action, _ = model.predict(obs, deterministic=True)
                 
                 if current_player == 0:
                     white_action = action
-                    black_action = None  # Reset for next turn
                 else:
                     black_action = action
-                    white_action = None
                 
                 print_board_and_info(env, reward, info, player_mode, human_color, white_action, black_action)
                 sleep(args.delay if len(sys.argv) > 1 else 0.5)

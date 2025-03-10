@@ -7,7 +7,6 @@ import numpy as np
 import os
 from collections import defaultdict, deque
 from src.cnn import create_cnn_mcts_ppo
-from src.mcts import create_mcts_ppo
 import multiprocessing
 import re
 import sys
@@ -303,8 +302,6 @@ def parse_arguments():
                         help='Frequency to use MCTS during training (0.0-1.0, default: 1.0 = always)')
     parser.add_argument('--mcts_envs_frac', type=float, default=1.0,
                         help='Max fraction of environments to use MCTS on (0.0-1.0, default: 1.0 = all eligible envs)')
-    parser.add_argument('--separate_color_learning', action='store_true',
-                        help='Train separate policies for black and white (more accurate but slower)')
     return parser.parse_args()
 
 def main():
@@ -405,8 +402,7 @@ def main():
         mcts_sims=args.mcts_sims,
         mcts_eval_only=args.mcts_eval_only,
         mcts_freq=args.mcts_freq,
-        mcts_envs_frac=args.mcts_envs_frac,
-        separate_color_learning=args.separate_color_learning
+        mcts_envs_frac=args.mcts_envs_frac
     )
     
     # Set up callbacks

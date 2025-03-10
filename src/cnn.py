@@ -473,50 +473,26 @@ class MCTSPPO(PPO):
     PPO with MCTS integration and self-play for chess
     Includes custom rollout collection logic
     """
-    def __init__(self, policy, env, **kwargs):
-        # Extract custom parameters
-        self.mcts_sims = kwargs.pop('mcts_sims', 100)
-        self.mcts_eval_only = kwargs.pop('mcts_eval_only', False)
-        self.mcts_freq = kwargs.pop('mcts_freq', 1.0)
-        self.mcts_envs_frac = kwargs.pop('mcts_envs_frac', 1.0)
-        self.separate_color_learning = kwargs.pop('separate_color_learning', False)
-        
-        if self.mcts_freq < 1.0:
-            print(f"Using MCTS with {self.mcts_sims} simulations at {self.mcts_freq*100:.1f}% frequency")
+    def __init__(self, policy, env, learning_rate=3e-4, n_steps=2048, batch_size=64, n_epochs=10,
+                gamma=0.99, gae_lambda=0.95, clip_range=0.2, clip_range_vf=None,
+                normalize_advantage=True, ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5,
+                use_sde=False, sde_sample_freq=-1, target_kl=None, tensorboard_log=None,
+                policy_kwargs=None, verbose=0, seed=None, device='auto',
+                _init_setup_model=True, mcts_sims=100, mcts_eval_only=False, mcts_freq=1.0,
+                mcts_envs_frac=1.0):
+                
+        super().__init__(policy, env, learning_rate, n_steps, batch_size, n_epochs,
+                        gamma, gae_lambda, clip_range, clip_range_vf, normalize_advantage,
+                        ent_coef, vf_coef, max_grad_norm, use_sde, sde_sample_freq,
+                        target_kl, tensorboard_log, policy_kwargs, verbose, seed, device,
+                        _init_setup_model)
             
-        if self.mcts_envs_frac < 1.0:
-            print(f"Limiting MCTS to at most {self.mcts_envs_frac*100:.1f}% of environments per step")
-            
-        if self.separate_color_learning:
-            print("Using separate experience buffers for black and white pieces")
-        
-        super().__init__(policy, env, **kwargs)
+        self.mcts_sims = mcts_sims
+        self.mcts_eval_only = mcts_eval_only
+        self.mcts_freq = mcts_freq
+        self.mcts_envs_frac = mcts_envs_frac
         
         self.last_agent_step = [None] * self.n_envs
-        
-        # Set up separate buffers for white and black if requested
-        if self.separate_color_learning:
-            # Original buffer will be used for white
-            self.white_buffer = self.rollout_buffer
-            
-            # Create a separate buffer with identical parameters for black
-            self.black_buffer = RolloutBuffer(
-                buffer_size=self.rollout_buffer.buffer_size,
-                observation_space=self.rollout_buffer.observation_space,
-                action_space=self.rollout_buffer.action_space,
-                device=self.rollout_buffer.device,
-                gae_lambda=self.rollout_buffer.gae_lambda,
-                gamma=self.rollout_buffer.gamma,
-                n_envs=self.rollout_buffer.n_envs,
-            )
-        
-        if self.n_envs % 2 == 0:
-            half = self.n_envs // 2
-            self.agent_record_player = np.array([0] * half + [1] * half)
-        else:
-            half = self.n_envs // 2
-            extra = np.random.choice([0, 1])
-            self.agent_record_player = np.array([0] * half + [1] * half + [extra])
         
         # Initialize opponent policies list with a random policy
         self.opponent_policies = []
@@ -574,40 +550,56 @@ class MCTSPPO(PPO):
             
         self.opponent_pool_prob = kwargs.get('opponent_pool_prob', 0.5)
     
-    def collect_rollouts(self, env, callback, rollout_buffer: RolloutBuffer, n_rollout_steps):
-        assert self._last_obs is not None, "No previous observation"
+    def _setup_model(self) -> None:
+        # Initialize buffers for advantage calculation
+        self.rollout_buffer = RolloutBuffer(
+            self.n_steps,
+            self.observation_space,
+            self.action_space,
+            device=self.device,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            n_envs=self.n_envs,
+        )
+        
+        # Initialize actor-critic model
+        self.policy = self.policy_class(
+            self.observation_space,
+            self.action_space,
+            self.lr_schedule,
+            **self.policy_kwargs,
+        )
+        self.policy = self.policy.to(self.device)
+    
+    def collect_rollouts(
+        self,
+        env,
+        callback,
+        rollout_buffer,
+        n_rollout_steps,
+    ) -> bool:
+        assert self._last_obs is not None, "No previous observation was provided"
+        # Use eval mode by default, except when collecting rollouts
+        if not self.mcts_eval_only:
+            self.policy.set_training_mode(True)
+            
         n_steps = 0
+        rollout_buffer.reset()
         
-        # Reset appropriate buffers
-        if self.separate_color_learning:
-            # Reset both color-specific buffers
-            self.white_buffer.reset()
-            self.black_buffer.reset()
-            # Point to the buffers for easier reference later
-            white_buffer = self.white_buffer
-            black_buffer = self.black_buffer
-        else:
-            # Use the provided rollout buffer for all experiences
-            rollout_buffer.reset()
+        # Sample and track which environments will use MCTS for this rollout
+        use_mcts_mask = np.random.random(self.n_envs) < self.mcts_freq
+        use_mcts_mask = use_mcts_mask & (np.random.random(self.n_envs) < self.mcts_envs_frac)
         
-        infos = [{} for _ in range(self.n_envs)]
-        current_players = [0 for _ in range(self.n_envs)]
+        # For environments using MCTS, create search trees
+        if np.any(use_mcts_mask):
+            # Initialize MCTS root nodes for each environment using it
+            roots = {}
+            for env_idx in np.where(use_mcts_mask)[0]:
+                state = env.envs[env_idx].unwrapped.board.copy()
+                player = 1 if state.turn else -1
+                roots[env_idx] = Node(state=state, root_player=player)
         
-        if hasattr(env, 'env_method'):
-            try:
-                current_players = env.env_method('get_current_player')
-            except Exception as e:
-                print(f"Warning: Could not get current player: {e}")
-                
-        # Initialize policy if not already done
-        if self.policy.mcts is None:
-            self.policy.init_mcts(num_simulations=self.mcts_sims, c_puct=2.0)
-            
-        # Initialize current_opponent_policies if it's None
-        if self.current_opponent_policies is None:
-            self.current_opponent_policies = [self.policy] * self.n_envs
-            
-        use_mcts_in_training = not self.mcts_eval_only  # Only use MCTS during training if not eval_only mode
+        callback.on_rollout_start()
 
         while n_steps < n_rollout_steps:
             actions = np.zeros(self.n_envs, dtype=int)
@@ -782,63 +774,22 @@ class MCTSPPO(PPO):
             if not callback.on_step():
                 return False
 
-            # Add all transitions to buffer, not just agent's turns
-            if self.separate_color_learning:
-                # Separate white and black experiences
-                white_indices = []
-                black_indices = []
-                
-                # Check the player color from the channel 12 of the board observation
-                for env_idx in range(self.n_envs):
-                    # Check the color of the current player (channel 12 in the observation)
-                    # 1.0 means white's turn, 0.0 means black's turn
-                    board_flat = self._last_obs['board'][env_idx]
-                    # Reconstruct the 3D board to get the player channel (channel 12)
-                    # Shape is (13, 8, 8), channel 12 indicates the current player
-                    board_3d = board_flat.reshape(13, 8, 8)
-                    player_channel = board_3d[12, 0, 0]  # Check first element of player channel
-                    
-                    if player_channel > 0.5:  # White's turn
-                        white_indices.append(env_idx)
-                    else:  # Black's turn
-                        black_indices.append(env_idx)
-                
-                # Add white player experiences to white buffer
-                if white_indices:
-                    self.white_buffer.add(
-                        {k: v[white_indices] for k, v in self._last_obs.items()},
-                        actions.reshape(self.n_envs, 1)[white_indices],
-                        rewards[white_indices],
-                        self._last_episode_starts[white_indices],
-                        batch_values[white_indices],
-                        batch_log_probs[white_indices]
-                    )
-                
-                # Add black player experiences to black buffer
-                if black_indices:
-                    self.black_buffer.add(
-                        {k: v[black_indices] for k, v in self._last_obs.items()},
-                        actions.reshape(self.n_envs, 1)[black_indices],
-                        rewards[black_indices],
-                        self._last_episode_starts[black_indices],
-                        batch_values[black_indices],
-                        batch_log_probs[black_indices]
-                    )
-            else:
-                # Original behavior: add all transitions to the same buffer
-                rollout_buffer.add(
-                    self._last_obs,
-                    actions.reshape(self.n_envs, 1),
-                    rewards,
-                    self._last_episode_starts,
-                    batch_values,
-                    batch_log_probs
-                )
+            # Add transitions to appropriate buffer based on player color
+            rollout_buffer.add(
+                self._last_obs,
+                actions.reshape(self.n_envs, 1),
+                rewards,
+                self._last_episode_starts,
+                batch_values,
+                batch_log_probs
+            )
 
             for env_idx in range(self.n_envs):
                 if dones[env_idx]:
                     if self.last_agent_step[env_idx] is not None:
                         last_pos = self.last_agent_step[env_idx]
+                        
+                        # Apply the appropriate reward
                         if infos[env_idx].get('is_draw', False):
                             rollout_buffer.rewards[last_pos, env_idx] = 0
                         elif infos[env_idx].get('white_won', False):
@@ -890,6 +841,7 @@ class MCTSPPO(PPO):
                     for key, value in self._last_obs.items()
                 }
                 last_values = self.policy.predict_values(obs_tensor)
+                
             rollout_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
         except Exception as ex:
             print(f"Error computing returns and advantage: {ex}")
@@ -900,132 +852,51 @@ class MCTSPPO(PPO):
 
     def train(self) -> None:
         """
-        Override the train method to handle separate buffers for white and black
+        Update policy using the currently gathered rollout buffer.
         """
-        if self.separate_color_learning:
-            # Train on white experiences
-            if self.white_buffer.pos > 0:  # Check if buffer has data
-                self._train_on_buffer(self.white_buffer, "white")
-            
-            # Train on black experiences
-            if self.black_buffer.pos > 0:  # Check if buffer has data
-                self._train_on_buffer(self.black_buffer, "black")
-        else:
-            # Use original PPO training with the combined buffer
-            super().train()
-    
-    def _train_on_buffer(self, buffer, color):
-        """
-        Train on a specific buffer (white or black)
-        """
-        # Reference the original rollout buffer temporarily
-        original_buffer = self.rollout_buffer
-        self.rollout_buffer = buffer
+        # Switch to train mode (this affects batch norm / dropout)
+        self.policy.set_training_mode(True)
         
-        # Print training info
-        print(f"Training on {color} experiences with {buffer.pos} steps")
-        
-        # Original PPO training code from parent class
+        # Update optimizer learning rate
         self._update_learning_rate(self.policy.optimizer)
         
-        # Initialize logging values
-        pg_losses, clip_fractions = [], []
-        value_losses, entropy_losses = [], []
+        # Calculate advantage
+        self.rollout_buffer.compute_returns_and_advantage(last_values=clip_values, last_dones=clip_dones)
+
+    def learn(
+        self,
+        total_timesteps: int,
+        callback = None,
+        log_interval: int = 1,
+        tb_log_name: str = "MCTSPPO",
+        reset_num_timesteps: bool = True,
+        progress_bar: bool = False,
+    ):
+        """
+        Return a trained model.
         
-        # Train for n_epochs on the rollout buffer
-        for epoch in range(self.n_epochs):
-            approx_kl_divs = []
-            # Do a complete pass on the rollout buffer
-            for rollout_data in buffer.get(self.batch_size):
-                actions = rollout_data.actions
-                if isinstance(self.action_space, spaces.Discrete):
-                    # Convert discrete action from float to long
-                    actions = actions.long().flatten()
-
-                # Re-sample the noise matrix because the log_std has changed
-                if self.use_sde:
-                    self.policy.reset_noise(self.batch_size)
-
-                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
-                values = values.flatten()
-                # Normalize advantage
-                advantages = rollout_data.advantages
-                if self.normalize_advantage:
-                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-                # ratio between old and new policy, should be one at the first iteration
-                ratio = torch.exp(log_prob - rollout_data.old_log_prob)
-
-                # clipped surrogate loss
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
-                policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
-
-                # Logging
-                pg_losses.append(policy_loss.item())
-                clip_fraction = torch.mean((torch.abs(ratio - 1) > self.clip_range).float()).item()
-                clip_fractions.append(clip_fraction)
-
-                if self.clip_range_vf is None:
-                    # No clipping
-                    values_pred = values
-                else:
-                    # Clip the different between old and new value
-                    # NOTE: this depends on the reward scaling
-                    values_pred = rollout_data.old_values + torch.clamp(
-                        values - rollout_data.old_values, -self.clip_range_vf, self.clip_range_vf
-                    )
-                # Value loss using the TD(gae_lambda) target
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
-                value_losses.append(value_loss.item())
-
-                # Entropy loss favor exploration
-                if entropy is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss = -torch.mean(-log_prob)
-                else:
-                    entropy_loss = -torch.mean(entropy)
-
-                entropy_losses.append(entropy_loss.item())
-
-                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
-
-                # Calculate approximate form of reverse KL Divergence for early stopping
-                # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
-                # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
-                # and Schulman blog: http://joschu.net/blog/kl-approx.html
-                with torch.no_grad():
-                    log_ratio = log_prob - rollout_data.old_log_prob
-                    approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
-
-                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                    continue
-
-                # Optimization step
-                self.policy.optimizer.zero_grad()
-                loss.backward()
-                # Clip grad norm
-                if self.max_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
+        Args:
+            total_timesteps: The total number of samples to train on
+            callback: Function called at every step with state of the algorithm
+            log_interval: The number of timesteps before logging
+            tb_log_name: The name of the tensorboard log
+            reset_num_timesteps: Whether to reset the current timestep number
+            progress_bar: Display a progress bar using tqdm
             
-            self._n_updates += 1
-            
-        # Calculate statistics
-        explained_var = explained_variance(buffer.values.flatten(), buffer.returns.flatten())
-        
-        # Print training statistics
-        print(f"{color.capitalize()} training: loss(p)={np.mean(pg_losses):.5f}, "
-              f"loss(v)={np.mean(value_losses):.5f}, loss(e)={np.mean(entropy_losses):.5f}, "
-              f"kl={np.mean(approx_kl_divs):.5f}, clip={np.mean(clip_fractions):.3f}, "
-              f"explained_var={explained_var:.3f}")
-        
-        # Restore original buffer
-        self.rollout_buffer = original_buffer
+        Returns:
+            Self (trained model)
+        """
+        return super().learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            log_interval=log_interval,
+            tb_log_name=tb_log_name,
+            reset_num_timesteps=reset_num_timesteps,
+            progress_bar=progress_bar,
+        )
 
 
-def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100, mcts_eval_only=False, mcts_freq=1.0, mcts_envs_frac=1.0, separate_color_learning=False):
+def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, learning_rate=3e-5, n_epochs=4, batch_size=256, clip_range=0.2, max_grad_norm=None, use_layer_norm=True, mcts_sims=100, mcts_eval_only=False, mcts_freq=1.0, mcts_envs_frac=1.0):
     if device == 'cuda':
         torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
         
@@ -1061,9 +932,6 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
             print(f"MCTS enabled during training at {mcts_freq*100:.1f}% frequency with {mcts_sims} simulations")
         else:
             print(f"MCTS enabled during both training and evaluation with {mcts_sims} simulations")
-    
-    if separate_color_learning:
-        print("Using separate learning for white and black pieces")
     
     # Use a higher learning rate for faster training
     if learning_rate > 3e-4 and not checkpoint:
@@ -1101,7 +969,6 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None, lea
         'mcts_eval_only': mcts_eval_only,  # Whether to use MCTS only during evaluation
         'mcts_freq': mcts_freq,  # Pass MCTS frequency
         'mcts_envs_frac': mcts_envs_frac,  # Pass MCTS environment fraction
-        'separate_color_learning': separate_color_learning,  # Enable separate learning for black and white
     }
     
     # Add max_grad_norm only if it's not None
