@@ -415,23 +415,30 @@ class RolloutWorker:
             # Convert observation to tensor format expected by the model
             if isinstance(actual_obs, dict) and 'board' in actual_obs and 'action_mask' in actual_obs:
                 # Dict format with board and action_mask
+                # Create copies of the arrays to ensure contiguous memory layout
+                board_data = np.array(actual_obs['board']).copy() if isinstance(actual_obs['board'], np.ndarray) else actual_obs['board']
+                mask_data = np.array(actual_obs['action_mask']).copy() if isinstance(actual_obs['action_mask'], np.ndarray) else actual_obs['action_mask']
+                
                 obs_dict = {
-                    'board': torch.FloatTensor(actual_obs['board']).unsqueeze(0).to(self.device),
-                    'action_mask': torch.FloatTensor(actual_obs['action_mask']).unsqueeze(0).to(self.device)
+                    'board': torch.FloatTensor(board_data).unsqueeze(0).to(self.device),
+                    'action_mask': torch.FloatTensor(mask_data).unsqueeze(0).to(self.device)
                 }
             elif isinstance(actual_obs, np.ndarray):
                 # Numpy array format - split into board and mask components
+                # Create a copy to ensure contiguous memory layout
+                actual_obs_copy = actual_obs.copy()
+                
                 # Assuming board is first 832 elements (13*8*8) and mask is the rest
                 board_size = 13 * 8 * 8  # Board size
-                if len(actual_obs.shape) == 1 and actual_obs.shape[0] > board_size:
+                if len(actual_obs_copy.shape) == 1 and actual_obs_copy.shape[0] > board_size:
                     obs_dict = {
-                        'board': torch.FloatTensor(actual_obs[:board_size]).unsqueeze(0).to(self.device),
-                        'action_mask': torch.FloatTensor(actual_obs[board_size:]).unsqueeze(0).to(self.device)
+                        'board': torch.FloatTensor(actual_obs_copy[:board_size]).unsqueeze(0).to(self.device),
+                        'action_mask': torch.FloatTensor(actual_obs_copy[board_size:]).unsqueeze(0).to(self.device)
                     }
                 else:
                     # Just treat the whole thing as a board
                     obs_dict = {
-                        'board': torch.FloatTensor(actual_obs).unsqueeze(0).to(self.device),
+                        'board': torch.FloatTensor(actual_obs_copy).unsqueeze(0).to(self.device),
                         'action_mask': torch.ones(1, 4672, device=self.device)  # Default mask allowing all actions
                     }
             else:
@@ -616,61 +623,99 @@ class RolloutWorker:
     
     def process_buffer(self):
         """Process buffer for training (calculate returns and advantages)"""
-        # Convert to numpy arrays
-        obs = self.buffer['obs']
-        actions = np.array(self.buffer['actions'])
-        rewards = np.array(self.buffer['rewards'])
-        values = np.array(self.buffer['values'])
-        log_probs = np.array(self.buffer['log_probs'])
-        dones = np.array(self.buffer['dones'])
-        
-        # Calculate returns and advantages using GAE
-        advantages = np.zeros_like(rewards)
-        returns = np.zeros_like(rewards)
-        
-        # Get next value (0 if last observation led to done)
-        if dones[-1]:
-            next_value = 0
-        else:
-            # Get value for the last observation
-            obs_dict = {
-                'board': torch.FloatTensor(self.current_obs['board']).unsqueeze(0).to(self.device),
-                'action_mask': torch.FloatTensor(self.current_obs['action_mask']).unsqueeze(0).to(self.device)
-            }
-            with torch.no_grad():
-                next_value = self.model.predict_values(obs_dict).item()
-        
-        # Calculate GAE
-        gae = 0
-        gamma = 0.99
-        gae_lambda = 0.95
-        
-        for t in reversed(range(len(rewards))):
-            # For terminal states, the next value is 0
-            if t == len(rewards) - 1:
-                next_non_terminal = 1.0 - dones[t]
-                next_values = next_value
+        try:
+            # Check if buffer is empty or has no observations
+            if not self.buffer or 'obs' not in self.buffer or len(self.buffer['obs']) == 0:
+                logger.warning(f"Worker {self.worker_id}: Empty buffer in process_buffer")
+                return {
+                    'obs': [],
+                    'actions': np.array([]),
+                    'returns': np.array([]),
+                    'advantages': np.array([]),
+                    'log_probs': np.array([]),
+                    'values': np.array([])
+                }
+            
+            # Convert to numpy arrays
+            obs = self.buffer['obs']
+            actions = np.array(self.buffer['actions'])
+            rewards = np.array(self.buffer['rewards'])
+            values = np.array(self.buffer['values'])
+            log_probs = np.array(self.buffer['log_probs'])
+            dones = np.array(self.buffer['dones'])
+            
+            # Calculate returns and advantages using GAE
+            advantages = np.zeros_like(rewards)
+            returns = np.zeros_like(rewards)
+            
+            # Get next value (0 if last observation led to done)
+            if dones[-1]:
+                next_value = 0
             else:
-                next_non_terminal = 1.0 - dones[t]
-                next_values = values[t + 1]
+                # Get value for the last observation
+                try:
+                    # Only try to predict a value if we have a valid observation
+                    if isinstance(self.current_obs, dict) and 'board' in self.current_obs and 'action_mask' in self.current_obs:
+                        # Create copies to avoid stride issues
+                        board_data = np.array(self.current_obs['board']).copy() if isinstance(self.current_obs['board'], np.ndarray) else self.current_obs['board']
+                        mask_data = np.array(self.current_obs['action_mask']).copy() if isinstance(self.current_obs['action_mask'], np.ndarray) else self.current_obs['action_mask']
+                        
+                        obs_dict = {
+                            'board': torch.FloatTensor(board_data).unsqueeze(0).to(self.device),
+                            'action_mask': torch.FloatTensor(mask_data).unsqueeze(0).to(self.device)
+                        }
+                        
+                        with torch.no_grad():
+                            next_value = self.model.predict_values(obs_dict).item()
+                    else:
+                        # Fallback if observation is invalid
+                        next_value = 0
+                except Exception as e:
+                    logger.error(f"Worker {self.worker_id}: Error getting next value: {str(e)}")
+                    next_value = 0
             
-            # Calculate delta and GAE
-            delta = rewards[t] + gamma * next_values * next_non_terminal - values[t]
-            gae = delta + gamma * gae_lambda * next_non_terminal * gae
+            # Calculate GAE
+            gae = 0
+            gamma = 0.99
+            gae_lambda = 0.95
             
-            # Store return and advantage
-            advantages[t] = gae
-            returns[t] = gae + values[t]
-        
-        # Return processed buffer
-        return {
-            'obs': obs,
-            'actions': actions,
-            'returns': returns,
-            'advantages': advantages,
-            'log_probs': log_probs,
-            'values': values
-        }
+            for t in reversed(range(len(rewards))):
+                # For terminal states, the next value is 0
+                if t == len(rewards) - 1:
+                    next_non_terminal = 1.0 - dones[t]
+                    next_values = next_value
+                else:
+                    next_non_terminal = 1.0 - dones[t]
+                    next_values = values[t + 1]
+                
+                # Calculate delta and GAE
+                delta = rewards[t] + gamma * next_values * next_non_terminal - values[t]
+                gae = delta + gamma * gae_lambda * next_non_terminal * gae
+                
+                # Store return and advantage
+                advantages[t] = gae
+                returns[t] = gae + values[t]
+            
+            # Return processed buffer
+            return {
+                'obs': obs,
+                'actions': actions,
+                'returns': returns,
+                'advantages': advantages,
+                'log_probs': log_probs,
+                'values': values
+            }
+        except Exception as e:
+            logger.error(f"Worker {self.worker_id}: Error in process_buffer: {str(e)}", exc_info=True)
+            # Return empty buffer as fallback
+            return {
+                'obs': [],
+                'actions': np.array([]),
+                'returns': np.array([]),
+                'advantages': np.array([]),
+                'log_probs': np.array([]),
+                'values': np.array([])
+            }
     
     def compute_gradients(self, processed_buffer):
         """Compute gradients from the processed buffer"""
@@ -831,18 +876,27 @@ class ObservationDictWrapper(gym.Wrapper):
             if not isinstance(obs, dict):
                 if isinstance(obs, tuple) and len(obs) >= 2:
                     # For tuples, assume first element is board, second is action_mask
-                    fixed_obs = {'board': obs[0], 'action_mask': obs[1]}
+                    fixed_obs = {
+                        'board': np.array(obs[0]).copy() if isinstance(obs[0], np.ndarray) else obs[0],
+                        'action_mask': np.array(obs[1]).copy() if isinstance(obs[1], np.ndarray) else obs[1]
+                    }
                 elif isinstance(obs, np.ndarray):
+                    # Create a copy to ensure contiguous memory layout
+                    obs_copy = obs.copy()
+                    
                     # For ndarray, split into board and mask components based on expected sizes
                     board_size = 13 * 8 * 8
-                    if obs.size > board_size:
+                    if obs_copy.size > board_size:
                         fixed_obs = {
-                            'board': obs[:board_size].reshape(13, 8, 8),
-                            'action_mask': obs[board_size:]
+                            'board': np.array(obs_copy[:board_size]).reshape(13, 8, 8).copy(),
+                            'action_mask': np.array(obs_copy[board_size:]).copy()
                         }
                     else:
                         # Just the board
-                        fixed_obs = {'board': obs, 'action_mask': np.ones(4672, dtype=np.float32)}
+                        fixed_obs = {
+                            'board': np.array(obs_copy).copy(),
+                            'action_mask': np.ones(4672, dtype=np.float32)
+                        }
                 else:
                     # Unknown format - create a dummy observation
                     logger.warning(f"ObservationDictWrapper.reset: Unknown observation format: {type(obs)}")
@@ -850,9 +904,15 @@ class ObservationDictWrapper(gym.Wrapper):
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
                         'action_mask': np.ones(4672, dtype=np.float32)
                     }
-                    
+                
                 logger.info(f"ObservationDictWrapper.reset: Converted obs to dict with keys {fixed_obs.keys()}")
                 obs = fixed_obs
+            else:
+                # If it's already a dict, make sure arrays are contiguous
+                if 'board' in obs and isinstance(obs['board'], np.ndarray):
+                    obs['board'] = np.array(obs['board']).copy()
+                if 'action_mask' in obs and isinstance(obs['action_mask'], np.ndarray):
+                    obs['action_mask'] = np.array(obs['action_mask']).copy()
             
             # Check if the observation is missing required keys
             if 'board' not in obs or 'action_mask' not in obs:
@@ -898,18 +958,27 @@ class ObservationDictWrapper(gym.Wrapper):
             if not isinstance(obs, dict):
                 if isinstance(obs, tuple) and len(obs) >= 2:
                     # For tuples, assume first element is board, second is action_mask
-                    fixed_obs = {'board': obs[0], 'action_mask': obs[1]}
+                    fixed_obs = {
+                        'board': np.array(obs[0]).copy() if isinstance(obs[0], np.ndarray) else obs[0],
+                        'action_mask': np.array(obs[1]).copy() if isinstance(obs[1], np.ndarray) else obs[1]
+                    }
                 elif isinstance(obs, np.ndarray):
+                    # Create a copy to ensure contiguous memory layout
+                    obs_copy = obs.copy()
+                    
                     # For ndarray, split into board and mask components based on expected sizes
                     board_size = 13 * 8 * 8
-                    if obs.size > board_size:
+                    if obs_copy.size > board_size:
                         fixed_obs = {
-                            'board': obs[:board_size].reshape(13, 8, 8),
-                            'action_mask': obs[board_size:]
+                            'board': np.array(obs_copy[:board_size]).reshape(13, 8, 8).copy(),
+                            'action_mask': np.array(obs_copy[board_size:]).copy()
                         }
                     else:
                         # Just the board
-                        fixed_obs = {'board': obs, 'action_mask': np.ones(4672, dtype=np.float32)}
+                        fixed_obs = {
+                            'board': np.array(obs_copy).copy(),
+                            'action_mask': np.ones(4672, dtype=np.float32)
+                        }
                 else:
                     # Unknown format - create a dummy observation
                     logger.warning(f"ObservationDictWrapper.step: Unknown observation format: {type(obs)}")
@@ -1058,15 +1127,20 @@ def train(args):
             # Process results as they come in
             for _ in range(len(workers)):
                 ready_ids, worker_tasks = ray.wait(worker_tasks, num_returns=1)
-                worker_id = ready_ids[0]
-                processed_buffer, complete_episode, metrics = ray.get(worker_id)
+                
+                # Get the actual worker object reference, not the task
+                worker_ref = workers[int(np.where(np.array(worker_tasks) == ready_ids[0])[0])]
+                
+                # Get results from the completed task
+                processed_buffer, complete_episode, metrics = ray.get(ready_ids[0])
                 
                 # Skip if buffer is empty
-                if len(processed_buffer['obs']) == 0:
+                if not processed_buffer or 'obs' not in processed_buffer or len(processed_buffer['obs']) == 0:
+                    logger.warning(f"Empty buffer received from worker")
                     continue
                 
-                # Compute gradients
-                gradients, loss_metrics = ray.get(workers[ready_ids[0] % len(workers)].compute_gradients.remote(processed_buffer))
+                # Compute gradients using the same worker that collected the experience
+                gradients, loss_metrics = ray.get(worker_ref.compute_gradients.remote(processed_buffer))
                 
                 # Update metrics with loss metrics
                 metrics.update(loss_metrics)
@@ -1117,7 +1191,8 @@ def train(args):
     
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
-    
+    except Exception as e:
+        logger.error(f"Error during training: {e}", exc_info=True)
     finally:
         # Save final checkpoint
         final_checkpoint_path = checkpoint_dir / "model_final.pt"
