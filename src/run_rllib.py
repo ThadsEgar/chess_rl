@@ -287,26 +287,28 @@ def train(args):
             # Get info dict from the episode
             info = episode.last_info_for()
             
-            # Record chess-specific metrics from the episode
-            if info.get("white_won", False):
-                self.white_wins += 1
-                episode.custom_metrics["white_win"] = 1.0
-            else:
+            # Only count completed games (where we have a game_outcome)
+            # This avoids counting episodes that end for other reasons
+            if "game_outcome" in info:
+                game_outcome = info["game_outcome"]
+                
+                # Initialize metrics
                 episode.custom_metrics["white_win"] = 0.0
-                
-            if info.get("black_won", False):
-                self.black_wins += 1
-                episode.custom_metrics["black_win"] = 1.0
-            else:
                 episode.custom_metrics["black_win"] = 0.0
-                
-            if info.get("draw", False):
-                self.draws += 1
-                episode.custom_metrics["draw"] = 1.0
-            else:
                 episode.custom_metrics["draw"] = 0.0
-            
-            self.total_games += 1
+                
+                # Increment appropriate counter based on outcome
+                if game_outcome == "white_win":
+                    self.white_wins += 1
+                    episode.custom_metrics["white_win"] = 1.0
+                elif game_outcome == "black_win":
+                    self.black_wins += 1
+                    episode.custom_metrics["black_win"] = 1.0
+                elif game_outcome == "draw":
+                    self.draws += 1
+                    episode.custom_metrics["draw"] = 1.0
+                
+                self.total_games += 1
             
             # Calculate win/draw percentages
             if self.total_games > 0:
@@ -370,7 +372,7 @@ def train(args):
             "lambda": 0.95,
             "kl_coeff": 0.2,
             "train_batch_size": 16000,    # Increased from 4000 for better GPU utilization
-            "sgd_minibatch_size": 1024,   # Increased from 128 for better GPU utilization
+            "sgd_minibatch_size": 2000,   # Increased from 128 for better GPU utilization
             "num_sgd_iter": 30,
             "lr": 3e-4,
             "clip_param": 0.2,

@@ -304,15 +304,18 @@ class ChessEnv(gym.Env):
                 if self.board.turn:  # Black's turn now, so White won
                     reward = 1.0 if self.board.turn == chess.BLACK else -1.0
                     info["white_won"] = True
+                    info["game_outcome"] = "white_win"
                 else:  # White's turn now, so Black won
                     reward = 1.0 if self.board.turn == chess.WHITE else -1.0
                     info["black_won"] = True
+                    info["game_outcome"] = "black_win"
                     
             elif self.board.is_stalemate() or self.board.is_insufficient_material() or \
                  self.board.is_fifty_moves() or self.board.is_repetition():
                 self.done = True
                 reward = 0.0
                 info["draw"] = True
+                info["game_outcome"] = "draw"
                 
             # Small negative reward per move to encourage efficiency
             if not self.done:
