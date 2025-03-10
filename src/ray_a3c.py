@@ -439,14 +439,14 @@ class RolloutWorker:
                     # Just treat the whole thing as a board
                     obs_dict = {
                         'board': torch.FloatTensor(actual_obs_copy).unsqueeze(0).to(self.device),
-                        'action_mask': torch.ones(1, 4672, device=self.device)  # Default mask allowing all actions
+                        'action_mask': torch.ones(1, 20480, device=self.device)  # Updated from 4672 to 20480
                     }
             else:
                 # Unknown format - log error and create a dummy observation
                 logger.error(f"Worker {self.worker_id}: Unknown observation format: {type(actual_obs)}")
                 obs_dict = {
                     'board': torch.zeros(1, 13 * 8 * 8, device=self.device),
-                    'action_mask': torch.ones(1, 4672, device=self.device)
+                    'action_mask': torch.ones(1, 20480, device=self.device)  # Updated from 4672 to 20480
                 }
             
             # Use MCTS if enabled and we're playing as the current player
@@ -895,14 +895,14 @@ class ObservationDictWrapper(gym.Wrapper):
                         # Just the board
                         fixed_obs = {
                             'board': np.array(obs_copy).copy(),
-                            'action_mask': np.ones(4672, dtype=np.float32)
+                            'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                         }
                 else:
                     # Unknown format - create a dummy observation
                     logger.warning(f"ObservationDictWrapper.reset: Unknown observation format: {type(obs)}")
                     fixed_obs = {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
-                        'action_mask': np.ones(4672, dtype=np.float32)
+                        'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                     }
                 
                 logger.info(f"ObservationDictWrapper.reset: Converted obs to dict with keys {fixed_obs.keys()}")
@@ -921,7 +921,7 @@ class ObservationDictWrapper(gym.Wrapper):
                 if 'board' not in obs:
                     obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
                 if 'action_mask' not in obs:
-                    obs['action_mask'] = np.ones(4672, dtype=np.float32)
+                    obs['action_mask'] = np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
             
             # Return consistent format
             return obs, info
@@ -931,7 +931,7 @@ class ObservationDictWrapper(gym.Wrapper):
             # Return a safe fallback
             dummy_obs = {
                 'board': np.zeros((13, 8, 8), dtype=np.float32),
-                'action_mask': np.ones(4672, dtype=np.float32)
+                'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
             }
             return dummy_obs, {}
     
@@ -977,14 +977,14 @@ class ObservationDictWrapper(gym.Wrapper):
                         # Just the board
                         fixed_obs = {
                             'board': np.array(obs_copy).copy(),
-                            'action_mask': np.ones(4672, dtype=np.float32)
+                            'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                         }
                 else:
                     # Unknown format - create a dummy observation
                     logger.warning(f"ObservationDictWrapper.step: Unknown observation format: {type(obs)}")
                     fixed_obs = {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
-                        'action_mask': np.ones(4672, dtype=np.float32)
+                        'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                     }
                 
                 obs = fixed_obs
@@ -996,7 +996,7 @@ class ObservationDictWrapper(gym.Wrapper):
                 if 'board' not in obs:
                     obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
                 if 'action_mask' not in obs:
-                    obs['action_mask'] = np.ones(4672, dtype=np.float32)
+                    obs['action_mask'] = np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
             
             # Return in the appropriate format based on what was received
             if len(step_result) == 5:  # Gymnasium API
@@ -1009,7 +1009,7 @@ class ObservationDictWrapper(gym.Wrapper):
             # Return a safe fallback
             dummy_obs = {
                 'board': np.zeros((13, 8, 8), dtype=np.float32),
-                'action_mask': np.ones(4672, dtype=np.float32)
+                'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
             }
             return dummy_obs, 0, True, {}
 

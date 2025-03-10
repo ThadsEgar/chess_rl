@@ -232,7 +232,10 @@ class ChessEnv(gym.Env):
                     self.board.set_piece_at(square, chess.Piece(chess.PAWN, chess.BLACK))
         
         # Define action and observation spaces
-        self.action_space = spaces.Discrete(4672)  # Maximum number of possible moves in chess
+        # Update action space to accommodate the full range of possible move indices
+        # Regular moves: 64*64 = 4096
+        # Promotion moves: 64*64 + (64*64*4) = 20480
+        self.action_space = spaces.Discrete(20480)  # Increased from 4672 to handle all possible action indices
         
         # Observation space includes board state and action mask
         self.board_channels = 13  # 6 piece types for each color + empty squares

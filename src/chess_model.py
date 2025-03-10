@@ -39,7 +39,7 @@ class ResidualBlock(nn.Module):
 
 # Pure PyTorch CNN model for chess
 class ChessCNN(nn.Module):
-    def __init__(self, action_space_n=4672):
+    def __init__(self, action_space_n=20480):
         super(ChessCNN, self).__init__()
         
         self.board_channels = 13  # Number of channels in the chess board representation
