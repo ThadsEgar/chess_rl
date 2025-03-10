@@ -13,7 +13,7 @@ import gymnasium as gym
 from pathlib import Path
 import ray
 from ray import tune
-from ray.rllib.algorithms.ppo import PPO, PPOConfig
+from ray.rllib.algorithms.ppo import PPO
 from ray.rllib.models import ModelCatalog
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.framework import try_import_torch
@@ -136,73 +136,50 @@ def train(args):
     # Register the custom model
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
     
-    # Use PPOConfig to create configuration and disable new API stack
-    config = (
-        PPOConfig()
-        .environment(create_rllib_chess_env)
-        .framework("torch")
-        .rollouts(num_rollout_workers=args.num_workers)
-        .training(
-            model={
+    # Register the environment
+    tune.register_env("chess_env", create_rllib_chess_env)
+    
+    # Configure RLlib using Ray Tune directly to bypass API version issues
+    analysis = tune.run(
+        "PPO",
+        stop={"training_iteration": args.max_iterations},
+        checkpoint_freq=args.checkpoint_interval,
+        checkpoint_at_end=True,
+        local_dir=args.checkpoint_dir,
+        verbose=1,
+        config={
+            "env": "chess_env",
+            "framework": "torch",
+            "num_workers": args.num_workers,
+            "num_gpus": 1 if args.device == "cuda" and not args.force_cpu else 0,
+            "model": {
                 "custom_model": "chess_masked_model",
-                "custom_model_config": {},
             },
-            gamma=0.99,
-            lambda_=0.95,
-            kl_coeff=0.2,
-            train_batch_size=4000,
-            sgd_minibatch_size=128,
-            num_sgd_iter=10,
-            lr=3e-4,
-            clip_param=0.2,
-            vf_clip_param=10.0,
-            entropy_coeff=0.01,
-            vf_loss_coeff=0.5,
-        )
-        .resources(
-            num_gpus=1 if args.device == "cuda" and not args.force_cpu else 0,
-            num_cpus_per_worker=1
-        )
-        .checkpointing(
-            checkpoint_frequency=args.checkpoint_interval,
-            checkpoint_at_end=True,
-            checkpoint_dir=args.checkpoint_dir
-        )
-        .experimental(_validate_config=False)
+            # PPO specific configs
+            "gamma": 0.99,
+            "lambda": 0.95,
+            "kl_coeff": 0.2,
+            "train_batch_size": 4000,
+            "sgd_minibatch_size": 128,
+            "num_sgd_iter": 30,
+            "lr": 3e-4,
+            "clip_param": 0.2,
+            "vf_clip_param": 10.0,
+            "entropy_coeff": 0.01,
+            "vf_loss_coeff": 0.5,
+            # Completely bypass validation
+            "_enable_new_api_stack": False,
+            "_experimental_enable_new_api_stack": False,
+            "_disable_execution_plan_api": True,
+            "_skip_validate_config": True,
+        },
     )
     
-    # CRUCIAL: Disable the new API stack
-    config.api_stack(
-        enable_rl_module_and_learner=False,
-        enable_env_runner_and_connector_v2=False
-    )
+    # Get best checkpoint
+    best_checkpoint = analysis.best_checkpoint
+    print(f"Best checkpoint: {best_checkpoint}")
     
-    # Create the algorithm with the config
-    algorithm = PPO(config)
-    
-    # Train for the specified number of iterations
-    for i in range(args.max_iterations):
-        result = algorithm.train()
-        
-        # Log some useful metrics
-        if i % 5 == 0:  # Log every 5 iterations
-            episode_reward_mean = result.get("episode_reward_mean", 0)
-            episode_len_mean = result.get("episode_len_mean", 0)
-            total_timesteps = result.get("timesteps_total", 0)
-            
-            print(f"Iteration {i}: reward={episode_reward_mean:.3f}, " +
-                  f"length={episode_len_mean:.1f}, total_steps={total_timesteps}")
-        
-        # Save checkpoint periodically
-        if i % args.checkpoint_interval == 0 or i == args.max_iterations - 1:
-            checkpoint_path = algorithm.save(args.checkpoint_dir)
-            print(f"Checkpoint saved to {checkpoint_path}")
-    
-    # Save final checkpoint
-    final_checkpoint = algorithm.save(args.checkpoint_dir)
-    print(f"Final checkpoint saved to {final_checkpoint}")
-    
-    return final_checkpoint
+    return best_checkpoint
 
 
 def evaluate(args):
