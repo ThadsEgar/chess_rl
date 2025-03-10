@@ -667,7 +667,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.05,
+            ent_coef=0.02,
             vf_coef=0.5,
             policy_kwargs=policy_kwargs,
         )
@@ -685,7 +685,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             gamma=0.99,
             device=device,
             clip_range=0.2,
-            ent_coef=0.05,
+            ent_coef=0.02,
             vf_coef=0.5,
         )
     
