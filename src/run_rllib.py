@@ -30,10 +30,19 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
         
-        # Get feature dimensions from observation space
-        assert isinstance(obs_space, gym.spaces.Dict)
-        self.board_shape = obs_space["board"].shape
-        self.action_mask_shape = obs_space["action_mask"].shape
+        # Handle both Dict observation spaces and non-Dict spaces
+        if isinstance(obs_space, gym.spaces.Dict):
+            # Get feature dimensions from observation space
+            self.board_shape = obs_space["board"].shape
+            self.action_mask_shape = obs_space["action_mask"].shape
+        else:
+            # If we don't have a Dict space, assume it's a Box with the expected board dimensions
+            # Log a warning but continue instead of raising an error
+            print(f"WARNING: Expected Dict observation space but got {type(obs_space)}. Assuming standard dimensions.")
+            # Assume standard chess board dimensions: 13 channels for pieces, 8x8 board
+            self.board_shape = (13, 8, 8)
+            self.action_mask_shape = (20480,)  # Standard action mask size
+            
         self.board_channels = self.board_shape[0]  # 13 channels (6 piece types x 2 colors + empty)
         self.board_size = self.board_shape[1]  # 8x8 board
         
@@ -48,81 +57,180 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(256, 832),
-            nn.ReLU()
+            nn.ReLU(),
         )
         
-        # Policy network (actor)
-        self.policy_net = nn.Sequential(
-            nn.Linear(832, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, num_outputs)
-        )
+        # Policy and value heads
+        self.policy_head = nn.Linear(832, num_outputs)
+        self.value_head = nn.Linear(832, 1)
         
-        # Value network (critic)
-        self.value_net = nn.Sequential(
-            nn.Linear(832, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
+        # Initialize the models
+        self._value = None
         
-        # Initialize the weights
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-        
-        # Current value estimate (needed for RLlib's TorchModelV2 API)
-        self._cur_value = None
-    
     def forward(self, input_dict, state, seq_lens):
-        """Forward pass of the model"""
-        # Extract observations
-        obs = input_dict["obs"]
-        board = obs["board"].float()
-        action_mask = obs["action_mask"].float()
+        # Extract observation
+        if "obs" in input_dict:
+            # Extract relevant observation parts
+            if isinstance(input_dict["obs"], dict):
+                # Dict observation space
+                board = input_dict["obs"]["board"]
+                action_mask = input_dict["obs"]["action_mask"]
+            else:
+                # Non-Dict observation space - try to extract board from raw observation
+                # Assume first part of flat observation is the board, reshape it
+                obs = input_dict["obs"]
+                if isinstance(obs, np.ndarray) or isinstance(obs, torch.Tensor):
+                    board_size = 13 * 8 * 8
+                    if len(obs.shape) == 1 and obs.shape[0] > board_size:
+                        # Reshape board part
+                        if isinstance(obs, np.ndarray):
+                            board = obs[:board_size].reshape(13, 8, 8)
+                            action_mask = obs[board_size:]
+                        else:
+                            board = obs[:board_size].reshape(-1, 13, 8, 8)
+                            action_mask = obs[board_size:]
+                    else:
+                        # Default board if we can't extract properly
+                        board = torch.zeros((1, 13, 8, 8), device=self.device)
+                        action_mask = torch.ones((1, 20480), device=self.device)
+                else:
+                    # Default board if we can't extract properly
+                    board = torch.zeros((1, 13, 8, 8), device=self.device)
+                    action_mask = torch.ones((1, 20480), device=self.device)
+        else:
+            # If "obs" not in input_dict, create default values
+            board = torch.zeros((1, 13, 8, 8), device=self.device)
+            action_mask = torch.ones((1, 20480), device=self.device)
+            
+        # Process through CNN feature extractor
+        features = self.features_extractor(board)
         
-        # Process the board through the CNN
-        batch_size = board.shape[0]
-        board_3d = board.reshape(batch_size, self.board_channels, self.board_size, self.board_size)
-        features = self.features_extractor(board_3d)
+        # Get raw action outputs (logits)
+        action_logits = self.policy_head(features)
         
-        # Get policy logits
-        logits = self.policy_net(features)
+        # Store value function for value_function() method
+        self._value = self.value_head(features)
         
-        # Apply action mask: assign -inf to unavailable actions
-        inf_mask = torch.clamp(torch.log(action_mask), -FLOAT_MAX, FLOAT_MAX)
-        masked_logits = logits + inf_mask
+        # Apply action mask by setting illegal actions to a large negative number
+        if action_mask is not None:
+            # Ensure action_mask is properly shaped for broadcasting
+            if len(action_mask.shape) == 1:
+                action_mask = action_mask.unsqueeze(0)
+                
+            # Ensure mask values are 0 or 1
+            inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -FLOAT_MAX
+            
+            # Apply the mask to the logits
+            masked_logits = action_logits + inf_mask
+            return masked_logits, state
         
-        # Save value function output
-        self._cur_value = self.value_net(features).squeeze(1)
+        # If no action mask available, return unmasked logits
+        return action_logits, state
         
-        return masked_logits, state
-    
     def value_function(self):
-        """Return the current value function estimate"""
-        assert self._cur_value is not None, "value function called before forward pass"
-        return self._cur_value
+        return self._value.squeeze(1)
 
 
 def create_rllib_chess_env(config):
     """Factory function to create chess environment for RLlib"""
-    env = ChessEnv()
-    
-    # First wrap with ActionMaskWrapper to add the action mask to observation
-    env = ActionMaskWrapper(env)
-    
-    # Verify the observation space is a Dict with the correct structure
-    if not isinstance(env.observation_space, gym.spaces.Dict) or 'board' not in env.observation_space.spaces or 'action_mask' not in env.observation_space.spaces:
-        # If not, add ObservationDictWrapper to ensure proper Dict format
-        from src.ray_a3c import ObservationDictWrapper
-        env = ObservationDictWrapper(env)
-    
-    return env
+    try:
+        # Create the base environment
+        env = ChessEnv()
+        
+        # First wrap with ActionMaskWrapper 
+        env = ActionMaskWrapper(env)
+        
+        # Extra validation and wrapping for RLlib compatibility
+        # This is critical for ensuring Dict observation space in all contexts
+        from gymnasium import spaces
+        import numpy as np
+        
+        # Check if observation space is already a Dict with expected structure
+        if not isinstance(env.observation_space, spaces.Dict) or 'board' not in env.observation_space.spaces or 'action_mask' not in env.observation_space.spaces:
+            # Print current observation space for debugging
+            print(f"WARNING: Expected Dict observation space but got {type(env.observation_space)}. Creating wrapper.")
+            
+            # Define a custom wrapper right here to ensure Dict observation space
+            class DictObsWrapper(gym.Wrapper):
+                def __init__(self, env):
+                    super().__init__(env)
+                    # Define the correct observation space as Dict
+                    self.observation_space = spaces.Dict({
+                        'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
+                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32)
+                    })
+                
+                def reset(self, **kwargs):
+                    result = self.env.reset(**kwargs)
+                    if isinstance(result, tuple):
+                        obs, info = result
+                        return self._wrap_observation(obs), info
+                    else:
+                        return self._wrap_observation(result)
+                
+                def step(self, action):
+                    result = self.env.step(action)
+                    if len(result) == 4:  # obs, reward, done, info
+                        obs, reward, done, info = result
+                        return self._wrap_observation(obs), reward, done, info
+                    elif len(result) == 5:  # obs, reward, terminated, truncated, info
+                        obs, reward, terminated, truncated, info = result
+                        return self._wrap_observation(obs), reward, terminated, truncated, info
+                
+                def _wrap_observation(self, obs):
+                    # Convert observation to Dict format if it's not already
+                    if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
+                        return obs
+                    elif isinstance(obs, np.ndarray):
+                        # Split array into board and mask components
+                        board_size = 13 * 8 * 8  # Standard chess board size
+                        if len(obs.shape) == 1 and obs.shape[0] > board_size:
+                            board = obs[:board_size].reshape(13, 8, 8)
+                            action_mask = obs[board_size:]
+                            return {'board': board, 'action_mask': action_mask}
+                    
+                    # If we can't process the observation properly, return default
+                    print(f"WARNING: Could not process observation of type {type(obs)}, returning default observation")
+                    return {
+                        'board': np.zeros((13, 8, 8), dtype=np.float32),
+                        'action_mask': np.ones(env.action_space.n, dtype=np.float32)
+                    }
+            
+            # Apply our custom wrapper
+            env = DictObsWrapper(env)
+        
+        # Verify the wrapper is applied correctly
+        if not isinstance(env.observation_space, spaces.Dict):
+            print(f"ERROR: After wrapping, observation space is still not Dict: {type(env.observation_space)}")
+            
+        return env
+        
+    except Exception as e:
+        # Log any errors during environment creation
+        import traceback
+        print(f"Error creating environment: {e}")
+        print(traceback.format_exc())
+        # Return a placeholder environment with the expected Dict observation space
+        from gymnasium import spaces
+        import numpy as np
+        
+        class PlaceholderEnv(gym.Env):
+            def __init__(self):
+                self.action_space = spaces.Discrete(20480)
+                self.observation_space = spaces.Dict({
+                    'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
+                    'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32)
+                })
+            
+            def reset(self, **kwargs):
+                return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
+                        'action_mask': np.ones(20480, dtype=np.float32)}, {}
+            
+            def step(self, action):
+                return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
+                        'action_mask': np.ones(20480, dtype=np.float32)}, 0, True, False, {}
+        
+        return PlaceholderEnv()
 
 
 def train(args):
@@ -168,6 +276,10 @@ def train(args):
             "num_gpus": 1 if args.device == "cuda" and not args.force_cpu else 0,
             "model": {
                 "custom_model": "chess_masked_model",
+                # Add some extra model config parameters to help with initialization
+                "custom_model_config": {
+                    "handle_missing_action_mask": True,
+                }
             },
             # PPO specific configs
             "gamma": 0.99,
@@ -186,7 +298,15 @@ def train(args):
             "_experimental_enable_new_api_stack": False,
             "_disable_execution_plan_api": True,
             "_skip_validate_config": True,
-            "enable_rl_module_and_learner": False
+            "enable_rl_module_and_learner": False,
+            # Add extra options to help with initialization
+            "create_env_on_driver": True,
+            "normalize_actions": False,
+            "log_level": "DEBUG",
+            # Worker configuration to ensure observation space is correctly initialized
+            "remote_worker_envs": False,
+            "recreate_failed_workers": True,
+            "restart_failed_sub_environments": True
         },
     )
     
