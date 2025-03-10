@@ -13,6 +13,8 @@ from datetime import datetime
 import chess
 import random
 from pathlib import Path
+import socket
+import platform
 
 # Import the PyTorch chess model
 from src.chess_model import ChessCNN, MCTS
@@ -538,6 +540,8 @@ def train(args):
     device = args.device
     if device == 'auto':
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device == 'cpu' and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = 'mps'  # Use Metal Performance Shaders on Apple Silicon
     
     logger.info(f"Using device: {device}")
     
@@ -547,19 +551,73 @@ def train(args):
     
     # Create workers
     workers = []
-    for i in range(args.num_workers):
+    
+    # Determine if we're in a distributed environment
+    is_distributed = args.distributed if hasattr(args, 'distributed') else False
+    is_head = args.head if hasattr(args, 'head') else False
+    
+    # Worker setup strategy depends on our environment
+    hostname = socket.gethostname()
+    is_lambda = hostname.startswith('lambda-')
+    is_mac = platform.system() == 'Darwin'
+    
+    # Adjust worker count based on environment
+    num_workers = args.num_workers
+    if is_distributed:
+        if is_head and is_lambda:
+            # On Lambda head node with distributed mode: Create fewer workers to leave resources for other nodes
+            logger.info("Running as Lambda head node in distributed mode")
+            num_workers = max(1, num_workers // 2)
+        elif not is_head:
+            # On worker node: Adjust based on resources
+            if is_mac:
+                # On Mac worker: Use fewer workers to avoid overloading
+                logger.info("Running as Mac worker node")
+                num_workers = max(1, os.cpu_count() - 2)
+            else:
+                logger.info(f"Running as worker node on {hostname}")
+    
+    logger.info(f"Creating {num_workers} workers")
+    
+    for i in range(num_workers):
+        # Select appropriate device for this worker
         worker_device = device
-        # If using multiple GPUs, assign workers to different GPUs
-        if args.device == 'cuda' and torch.cuda.device_count() > 1:
-            worker_device = f'cuda:{i % torch.cuda.device_count()}'
         
-        worker = RolloutWorker.remote(
-            worker_id=i,
-            env_creator=create_chess_env,
-            param_server=param_server,
-            device=worker_device,
-            mcts_sims=args.mcts_sims if i < args.mcts_workers else 0
-        )
+        # Resource specification for Ray remote workers
+        worker_kwargs = {}
+        
+        # If using multiple GPUs, assign workers to different GPUs
+        if device == 'cuda' and torch.cuda.device_count() > 1:
+            worker_device = f'cuda:{i % torch.cuda.device_count()}'
+            worker_kwargs['num_gpus'] = 0.5  # Each worker uses 0.5 GPU
+        elif device == 'cuda':
+            worker_kwargs['num_gpus'] = 0.25  # Share GPU
+        elif device == 'mps':  # Apple Silicon GPU
+            worker_kwargs['num_cpus'] = 1
+        else:
+            worker_kwargs['num_cpus'] = 1
+        
+        # If we're on the Lambda machine with high-end GPUs, we can use MCTS more aggressively
+        use_mcts = i < args.mcts_workers
+        
+        # Create worker with appropriate resource specifications
+        worker_options = {k: v for k, v in worker_kwargs.items() if v is not None}
+        if worker_options:
+            worker = RolloutWorker.options(**worker_options).remote(
+                worker_id=i,
+                env_creator=create_chess_env,
+                param_server=param_server,
+                device=worker_device,
+                mcts_sims=args.mcts_sims if use_mcts else 0
+            )
+        else:
+            worker = RolloutWorker.remote(
+                worker_id=i,
+                env_creator=create_chess_env,
+                param_server=param_server,
+                device=worker_device,
+                mcts_sims=args.mcts_sims if use_mcts else 0
+            )
         workers.append(worker)
     
     logger.info(f"Created {len(workers)} workers")
@@ -643,8 +701,10 @@ def train(args):
         ray.get(param_server.save_checkpoint.remote(str(final_checkpoint_path)))
         logger.info(f"Final checkpoint saved to {final_checkpoint_path}")
         
-        # Shutdown Ray
-        ray.shutdown()
+        # Don't shutdown Ray if we're in distributed mode (it was started externally)
+        if not (hasattr(args, 'distributed') and args.distributed):
+            ray.shutdown()
+            logger.info("Ray shutdown complete")
 
 
 def evaluate(args):

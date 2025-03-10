@@ -11,6 +11,7 @@ import torch
 import ray
 import platform
 import psutil
+import socket
 
 from pathlib import Path
 
@@ -53,39 +54,77 @@ def detect_resources():
                 on_lambda_a10 = True
                 break
     
+    # Detect if we're on a Mac
+    is_mac = platform.system() == 'Darwin'
+    has_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+    
     resources = {
+        'hostname': socket.gethostname(),
         'cpu_count': cpu_count,
         'cpu_percent': cpu_percent,
         'memory_gb': memory_gb,
         'gpu_count': gpu_count,
         'gpu_info': gpu_info,
-        'on_lambda_a10': on_lambda_a10
+        'on_lambda_a10': on_lambda_a10,
+        'is_mac': is_mac,
+        'has_mps': has_mps
     }
     
     logger.info(f"Detected resources: {resources}")
     return resources
 
-def configure_ray(resources):
+def configure_ray(resources, args):
     """
     Configure Ray based on detected resources.
     """
     # Initialize Ray with appropriate resources
     if not ray.is_initialized():
-        # Default config
+        if args.distributed:
+            # Connect to existing Ray cluster
+            if args.head_address:
+                logger.info(f"Connecting to Ray cluster at {args.head_address}")
+                ray_config = {
+                    "address": args.head_address,
+                    "ignore_reinit_error": True,
+                }
+                if args.redis_password:
+                    ray_config["_redis_password"] = args.redis_password
+                
+                ray.init(**ray_config)
+                logger.info(f"Connected to Ray cluster at {args.head_address}")
+                return
+        
+        # Default config for local mode
         ray_config = {
             "ignore_reinit_error": True,
-            "include_dashboard": False,
+            "include_dashboard": args.dashboard,
         }
         
-        # Adjust config based on detected resources
-        if resources['gpu_count'] > 0:
-            ray_config["num_gpus"] = resources['gpu_count']
+        # Start Ray head node
+        if args.head:
+            ray_config["dashboard_host"] = "0.0.0.0"
+            ray_config["num_cpus"] = resources['cpu_count']
+            
+            if resources['gpu_count'] > 0:
+                ray_config["num_gpus"] = resources['gpu_count']
+            
+            # If the password is provided, use it
+            if args.redis_password:
+                ray_config["_redis_password"] = args.redis_password
+                
+            logger.info(f"Starting Ray head node with config: {ray_config}")
         
         # Special configuration for Lambda Labs A10 machine
         if resources['on_lambda_a10']:
             # A10 has 24GB VRAM, configure for better performance
             ray_config["_memory"] = 10 * 1024 * 1024 * 1024  # 10GB
             ray_config["object_store_memory"] = 10 * 1024 * 1024 * 1024  # 10GB
+        
+        # Special configuration for Mac
+        if resources['is_mac']:
+            # Macs often need less aggressive resource allocation
+            ray_config["num_cpus"] = max(1, resources['cpu_count'] - 2)  # Leave CPU cores for system
+            ray_config["object_store_memory"] = 2 * 1024 * 1024 * 1024  # 2GB
         
         # Initialize Ray
         ray.init(**ray_config)
@@ -100,9 +139,21 @@ def main():
                         choices=['train', 'evaluate', 'self_play'],
                         help='Mode: train, evaluate, or self_play')
     parser.add_argument('--device', type=str, default='auto',
-                        help='Device to run on (cpu, cuda, auto)')
+                        help='Device to run on (cpu, cuda, mps, auto)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to model checkpoint for loading')
+    
+    # Distributed mode arguments
+    parser.add_argument('--distributed', action='store_true',
+                        help='Run in distributed mode across multiple machines')
+    parser.add_argument('--head', action='store_true',
+                        help='Start Ray as a head node')
+    parser.add_argument('--head_address', type=str, default=None,
+                        help='Address of the Ray head node to connect to (e.g., "ip:port")')
+    parser.add_argument('--redis_password', type=str, default=None,
+                        help='Password for connecting to the Redis server in the Ray cluster')
+    parser.add_argument('--dashboard', action='store_true',
+                        help='Include Ray dashboard')
     
     # Training arguments
     parser.add_argument('--num_workers', type=int, default=4,
@@ -140,15 +191,26 @@ def main():
     resources = detect_resources()
     
     # Configure Ray
-    configure_ray(resources)
+    configure_ray(resources, args)
     
     # Initialize appropriate device
     device = args.device
     if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if torch.cuda.is_available():
+            device = 'cuda'
+        elif resources['has_mps']:
+            device = 'mps'
+        else:
+            device = 'cpu'
     
     # Log some information about the run
     logger.info(f"Starting Ray A3C in {args.mode} mode on {device}")
+    if args.distributed:
+        if args.head:
+            logger.info(f"Running as head node")
+        else:
+            logger.info(f"Running as worker node connected to {args.head_address}")
+    
     logger.info(f"Command-line arguments: {args}")
     
     try:
