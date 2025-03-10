@@ -296,8 +296,8 @@ def train(args):
             "gamma": 0.99,
             "lambda": 0.95,
             "kl_coeff": 0.2,
-            "train_batch_size": 16000,
-            "sgd_minibatch_size": 1024,
+            "train_batch_size": 16000,    # Increased from 4000 for better GPU utilization
+            "sgd_minibatch_size": 1024,   # Increased from 128 for better GPU utilization
             "num_sgd_iter": 30,
             "lr": 3e-4,
             "clip_param": 0.2,
@@ -313,10 +313,10 @@ def train(args):
             # Add extra options to help with initialization
             "create_env_on_driver": True,
             "normalize_actions": False,
-            "log_level": "DEBUG",
+            "log_level": "INFO",  # Changed from DEBUG to reduce verbosity
             # Worker configuration to ensure observation space is correctly initialized
             "remote_worker_envs": False,
-            "restart_failed_env_runners": True,
+            "recreate_failed_workers": True,
             "restart_failed_sub_environments": True
         },
     )
