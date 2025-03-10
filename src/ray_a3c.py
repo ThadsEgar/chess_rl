@@ -47,28 +47,21 @@ class ParameterServer:
         # Validate the requested device is actually available
         self.device = self._validate_device(device)
         
-        # Initialize model
-        try:
-            self.model = ChessCNN().to(self.device)
-            self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
-        except Exception as e:
-            logger.error(f"Error initializing model on {device}: {str(e)}")
-            # Fall back to CPU if device initialization fails
-            if self.device != 'cpu':
-                logger.info("Falling back to CPU")
-                self.device = 'cpu'
-                self.model = ChessCNN().to(self.device)
-                self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        # Create model
+        if model_config:
+            self.model = model_config['model_class'](**model_config['model_kwargs'])
+        else:
+            from src.chess_model import ChessCNN
+            self.model = ChessCNN()
         
-        # Load from checkpoint if provided
-        if checkpoint_path and os.path.exists(checkpoint_path):
+        self.model.to(self.device)
+        
+        # Load checkpoint if provided
+        if checkpoint_path:
             self.load_checkpoint(checkpoint_path)
-            
-        # Current model version
-        self.version = 0
         
-        # Metrics tracking
-        self.training_metrics = {
+        # Initialize metrics
+        self.metrics = {
             'episode_rewards': [],
             'episode_lengths': [],
             'value_losses': [],
@@ -78,7 +71,8 @@ class ParameterServer:
             'white_wins': 0,
             'black_wins': 0,
             'draws': 0,
-            'games': 0
+            'games': 0,
+            'total_moves': 0,  # Track total moves across all environments
         }
         
         # Training hyperparameters
@@ -153,30 +147,30 @@ class ParameterServer:
         if metrics:
             # Update episode metrics
             if 'episode_reward' in metrics:
-                self.training_metrics['episode_rewards'].append(metrics['episode_reward'])
+                self.metrics['episode_rewards'].append(metrics['episode_reward'])
             if 'episode_length' in metrics:
-                self.training_metrics['episode_lengths'].append(metrics['episode_length'])
+                self.metrics['episode_lengths'].append(metrics['episode_length'])
             
             # Update loss metrics
             if 'value_loss' in metrics:
-                self.training_metrics['value_losses'].append(metrics['value_loss'])
+                self.metrics['value_losses'].append(metrics['value_loss'])
             if 'policy_loss' in metrics:
-                self.training_metrics['policy_losses'].append(metrics['policy_loss'])
+                self.metrics['policy_losses'].append(metrics['policy_loss'])
             if 'entropy_loss' in metrics:
-                self.training_metrics['entropy_losses'].append(metrics['entropy_loss'])
+                self.metrics['entropy_losses'].append(metrics['entropy_loss'])
             if 'total_loss' in metrics:
-                self.training_metrics['total_losses'].append(metrics['total_loss'])
+                self.metrics['total_losses'].append(metrics['total_loss'])
                 
             # Update game outcome metrics
             if 'white_win' in metrics and metrics['white_win']:
-                self.training_metrics['white_wins'] += 1
-                self.training_metrics['games'] += 1
+                self.metrics['white_wins'] += 1
+                self.metrics['games'] += 1
             elif 'black_win' in metrics and metrics['black_win']:
-                self.training_metrics['black_wins'] += 1
-                self.training_metrics['games'] += 1
+                self.metrics['black_wins'] += 1
+                self.metrics['games'] += 1
             elif 'draw' in metrics and metrics['draw']:
-                self.training_metrics['draws'] += 1
-                self.training_metrics['games'] += 1
+                self.metrics['draws'] += 1
+                self.metrics['games'] += 1
         
         # Return new weights
         return self.get_weights()
@@ -184,7 +178,7 @@ class ParameterServer:
     def get_metrics(self):
         """Return current training metrics"""
         # Calculate derived metrics
-        metrics = {**self.training_metrics}
+        metrics = {**self.metrics}
         
         # Add win rates
         if metrics['games'] > 0:
@@ -206,7 +200,7 @@ class ParameterServer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'version': self.version,
-            'metrics': self.training_metrics
+            'metrics': self.metrics
         }
         
         torch.save(checkpoint, path)
@@ -222,9 +216,14 @@ class ParameterServer:
         
         # Load metrics if available
         if 'metrics' in checkpoint:
-            self.training_metrics = checkpoint['metrics']
+            self.metrics = checkpoint['metrics']
         
         logger.info(f"Checkpoint loaded from {path} (version {self.version})")
+
+    def increment_total_moves(self, num_moves):
+        """Increment the total moves counter"""
+        self.metrics['total_moves'] += num_moves
+        return self.metrics['total_moves']
 
 
 @ray.remote
@@ -349,57 +348,26 @@ class RolloutWorker:
             raise
     
     def reset_env(self):
-        """Reset the environment and initialize a new episode"""
+        """Reset the environment and update the current observation"""
         try:
-            # Print info about the environment for debugging
-            logger.info(f"Worker {self.worker_id}: Environment type: {type(self.env)}")
+            result = self.env.reset()
             
-            # Newer versions of Gymnasium return (obs, info) tuple from reset()
-            logger.info(f"Worker {self.worker_id}: Calling env.reset()")
-            reset_result = self.env.reset()
-            logger.info(f"Worker {self.worker_id}: Reset result type: {type(reset_result)}")
-            
-            # Handle both old and new Gym/Gymnasium APIs
-            if isinstance(reset_result, tuple) and len(reset_result) >= 1:
-                # New API: (obs, info)
-                logger.info(f"Worker {self.worker_id}: Reset returned a tuple with {len(reset_result)} elements")
-                self.current_obs = reset_result[0]
-                # Store info if available
-                self.current_info = reset_result[1] if len(reset_result) > 1 else {}
-                logger.info(f"Worker {self.worker_id}: Extracted observation type: {type(self.current_obs)}")
+            # Handle different return formats
+            if isinstance(result, tuple) and len(result) >= 1:
+                # Modern Gym API: (obs, info)
+                self.current_obs = result[0]
             else:
-                # Old API: just obs
-                logger.info(f"Worker {self.worker_id}: Reset returned a non-tuple")
-                self.current_obs = reset_result
-                self.current_info = {}
-                
-            # Print the observation structure
-            logger.info(f"Worker {self.worker_id}: Current observation type: {type(self.current_obs)}")
-            if isinstance(self.current_obs, dict):
-                logger.info(f"Worker {self.worker_id}: Observation keys: {list(self.current_obs.keys())}")
-            elif isinstance(self.current_obs, tuple):
-                logger.info(f"Worker {self.worker_id}: Observation is tuple with {len(self.current_obs)} elements")
-                if len(self.current_obs) > 0:
-                    logger.info(f"Worker {self.worker_id}: First element type: {type(self.current_obs[0])}")
-            elif isinstance(self.current_obs, np.ndarray):
-                logger.info(f"Worker {self.worker_id}: Observation is ndarray with shape {self.current_obs.shape}")
-            else:
-                logger.info(f"Worker {self.worker_id}: Observation is of type {type(self.current_obs)}")
-                
+                self.current_obs = result
+
+            # Reset episode trackers
             self.episode_reward = 0
             self.episode_length = 0
-            
-            # Randomly choose if agent plays as white or black
-            self.player_color = random.randint(0, 1)  # 1=white, 0=black
-            
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Error in reset_env: {str(e)}", exc_info=True)
-            # Create empty observation as fallback
-            self.current_obs = {}
-            self.current_info = {}
+            # Create a fallback observation
+            self.current_obs = {'board': np.zeros((13, 8, 8), dtype=np.float32), 'action_mask': np.ones(20480, dtype=np.float32)}
             self.episode_reward = 0
             self.episode_length = 0
-            self.player_color = random.randint(0, 1)
     
     def select_action(self, obs):
         """Select an action using the model or MCTS"""
@@ -515,6 +483,7 @@ class RolloutWorker:
         
         # Run until buffer is filled or episode ends
         complete_episode = False
+        num_moves = 0  # Count moves in this collection
         
         try:
             for _ in range(num_steps):
@@ -532,6 +501,7 @@ class RolloutWorker:
                 # Step the environment
                 try:
                     step_result = self.env.step(action)
+                    num_moves += 1  # Count valid move
                 except Exception as e:
                     logger.error(f"Worker {self.worker_id}: Error stepping environment: {str(e)}", exc_info=True)
                     # Create a safe fallback
@@ -616,7 +586,7 @@ class RolloutWorker:
             # Process the buffer for training
             processed_buffer = self.process_buffer()
             
-            return processed_buffer, complete_episode, self.get_current_metrics()
+            return processed_buffer, complete_episode, self.get_current_metrics(), num_moves
         
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Error in collect_experience: {str(e)}", exc_info=True)
@@ -628,7 +598,7 @@ class RolloutWorker:
                 'advantages': np.array([]),
                 'log_probs': np.array([]),
                 'values': np.array([])
-            }, True, {}
+            }, True, {}, 0  # Added 0 for num_moves
     
     def process_buffer(self):
         """Process buffer for training (calculate returns and advantages)"""
@@ -849,92 +819,82 @@ def create_chess_env():
 
 
 class ObservationDictWrapper(gym.Wrapper):
-    """
-    A wrapper that ensures observations are always dictionaries with 'board' and 'action_mask' keys.
-    This handles inconsistencies between different Gym/Gymnasium versions.
-    """
-    def __init__(self, env):
-        super().__init__(env)
-        self.observation_space = env.observation_space
-        logger.info(f"ObservationDictWrapper: Wrapped env of type {type(env)}")
-        logger.info(f"ObservationDictWrapper: Observation space type: {type(self.observation_space)}")
-        
-        # Check observation space
-        if not isinstance(self.observation_space, spaces.Dict):
-            logger.warning(f"ObservationDictWrapper: Non-Dict observation space: {self.observation_space}")
+    """Ensure observations are in dictionary format with board and action_mask keys"""
     
+    def __init__(self, env):
+        super(ObservationDictWrapper, self).__init__(env)
+        # Store original observation space
+        self.orig_observation_space = env.observation_space
+        
+        # Check if already a Dict space
+        if isinstance(env.observation_space, spaces.Dict):
+            self.observation_space = env.observation_space
+        else:
+            # We need to wrap it in a Dict
+            self.observation_space = spaces.Dict({
+                'board': spaces.Box(0, 1, shape=(13, 8, 8), dtype=np.float32),
+                'action_mask': spaces.Box(0, 1, shape=(20480,), dtype=np.float32)
+            })
+        
     def reset(self, **kwargs):
-        """Reset the environment and convert the observation to a proper dict if needed."""
+        """Reset environment and ensure observation is a proper dict"""
         try:
-            reset_result = self.env.reset(**kwargs)
+            result = self.env.reset(**kwargs)
             
-            # Log the reset result format
-            logger.info(f"ObservationDictWrapper.reset: Result type: {type(reset_result)}")
-            
-            if isinstance(reset_result, tuple):
-                # Newer Gymnasium API returns (obs, info)
-                obs, info = reset_result
-                logger.info(f"ObservationDictWrapper.reset: Unpacked obs type: {type(obs)}")
+            # Handle different return formats
+            if isinstance(result, tuple):
+                # Unpack the tuple - could be (obs, info) or other format
+                if len(result) >= 2:
+                    obs, info = result[0], result[1]
+                else:
+                    # Single item tuple
+                    obs, info = result[0], {}
             else:
-                # Older API just returns obs
-                obs = reset_result
-                info = {}
-                logger.info(f"ObservationDictWrapper.reset: Direct obs type: {type(obs)}")
+                # Direct observation
+                obs, info = result, {}
             
-            # Make sure the observation is a dictionary
-            if not isinstance(obs, dict):
-                if isinstance(obs, tuple) and len(obs) >= 2:
-                    # For tuples, assume first element is board, second is action_mask
-                    fixed_obs = {
-                        'board': np.array(obs[0]).copy() if isinstance(obs[0], np.ndarray) else obs[0],
-                        'action_mask': np.array(obs[1]).copy() if isinstance(obs[1], np.ndarray) else obs[1]
-                    }
-                elif isinstance(obs, np.ndarray):
-                    # Create a copy to ensure contiguous memory layout
-                    obs_copy = obs.copy()
+            # Ensure observation is in the correct format
+            if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
+                # Already in the right format
+                fixed_obs = obs
+            else:
+                # Need to convert
+                if isinstance(obs, np.ndarray):
+                    # Try to split into board and mask components
+                    # Assuming first part is board, rest is mask
+                    board_size = 13 * 8 * 8  # Board representation size
+                    obs_copy = obs.copy()  # Create a copy
                     
-                    # For ndarray, split into board and mask components based on expected sizes
-                    board_size = 13 * 8 * 8
-                    if obs_copy.size > board_size:
+                    if len(obs_copy.shape) == 1 and obs_copy.shape[0] > board_size:
+                        # Split flat array into board and mask
                         fixed_obs = {
-                            'board': np.array(obs_copy[:board_size]).reshape(13, 8, 8).copy(),
-                            'action_mask': np.array(obs_copy[board_size:]).copy()
+                            'board': np.array(obs_copy[:board_size]).reshape(13, 8, 8),
+                            'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                         }
                     else:
-                        # Just the board
+                        # Just treat the whole thing as a board
                         fixed_obs = {
-                            'board': np.array(obs_copy).copy(),
+                            'board': np.array(obs_copy),
                             'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                         }
                 else:
-                    # Unknown format - create a dummy observation
-                    logger.warning(f"ObservationDictWrapper.reset: Unknown observation format: {type(obs)}")
+                    # Unknown format, create dummy observation
                     fixed_obs = {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
                         'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                     }
-                
-                logger.info(f"ObservationDictWrapper.reset: Converted obs to dict with keys {fixed_obs.keys()}")
-                obs = fixed_obs
+            
+            # Ensure all required keys are present
+            if 'board' not in fixed_obs:
+                fixed_obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
+            if 'action_mask' not in fixed_obs:
+                fixed_obs['action_mask'] = np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
+            
+            # Return in the appropriate format based on what was received
+            if isinstance(result, tuple) and len(result) >= 2:
+                return fixed_obs, info
             else:
-                # If it's already a dict, make sure arrays are contiguous
-                if 'board' in obs and isinstance(obs['board'], np.ndarray):
-                    obs['board'] = np.array(obs['board']).copy()
-                if 'action_mask' in obs and isinstance(obs['action_mask'], np.ndarray):
-                    obs['action_mask'] = np.array(obs['action_mask']).copy()
-            
-            # Check if the observation is missing required keys
-            if 'board' not in obs or 'action_mask' not in obs:
-                logger.warning(f"ObservationDictWrapper.reset: Missing keys in observation: {obs.keys()}")
-                # Add any missing keys
-                if 'board' not in obs:
-                    obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
-                if 'action_mask' not in obs:
-                    obs['action_mask'] = np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
-            
-            # Return consistent format
-            return obs, info
-            
+                return fixed_obs
         except Exception as e:
             logger.error(f"ObservationDictWrapper.reset: Error: {e}", exc_info=True)
             # Return a safe fallback
@@ -945,7 +905,7 @@ class ObservationDictWrapper(gym.Wrapper):
             return dummy_obs, {}
     
     def step(self, action):
-        """Take a step and ensure the observation is a proper dict."""
+        """Take a step and ensure the observation is a proper dict"""
         try:
             step_result = self.env.step(action)
             
@@ -957,62 +917,56 @@ class ObservationDictWrapper(gym.Wrapper):
                 elif len(step_result) == 5:  # (obs, reward, terminated, truncated, info)
                     obs, reward, done, truncated, info = step_result
                 else:
-                    logger.warning(f"ObservationDictWrapper.step: Unexpected step result format with {len(step_result)} elements")
+                    # Unexpected format
+                    logger.error(f"ObservationDictWrapper.step: Unexpected step result format with {len(step_result)} elements")
                     obs, reward, done, truncated, info = None, 0, True, False, {}
             else:
-                logger.warning(f"ObservationDictWrapper.step: Unexpected step result type: {type(step_result)}")
+                # Unexpected format
+                logger.error(f"ObservationDictWrapper.step: Unexpected step result type: {type(step_result)}")
                 obs, reward, done, truncated, info = None, 0, True, False, {}
             
-            # Make sure the observation is a dictionary
-            if not isinstance(obs, dict):
-                if isinstance(obs, tuple) and len(obs) >= 2:
-                    # For tuples, assume first element is board, second is action_mask
-                    fixed_obs = {
-                        'board': np.array(obs[0]).copy() if isinstance(obs[0], np.ndarray) else obs[0],
-                        'action_mask': np.array(obs[1]).copy() if isinstance(obs[1], np.ndarray) else obs[1]
-                    }
-                elif isinstance(obs, np.ndarray):
-                    # Create a copy to ensure contiguous memory layout
-                    obs_copy = obs.copy()
+            # Ensure observation is in the correct format
+            if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
+                # Already in the right format
+                fixed_obs = obs
+            else:
+                # Need to convert
+                if isinstance(obs, np.ndarray):
+                    # Try to split into board and mask components
+                    # Assuming first part is board, rest is mask
+                    board_size = 13 * 8 * 8  # Board representation size
+                    obs_copy = obs.copy()  # Create a copy
                     
-                    # For ndarray, split into board and mask components based on expected sizes
-                    board_size = 13 * 8 * 8
-                    if obs_copy.size > board_size:
+                    if len(obs_copy.shape) == 1 and obs_copy.shape[0] > board_size:
+                        # Split flat array into board and mask
                         fixed_obs = {
-                            'board': np.array(obs_copy[:board_size]).reshape(13, 8, 8).copy(),
-                            'action_mask': np.array(obs_copy[board_size:]).copy()
+                            'board': np.array(obs_copy[:board_size]).reshape(13, 8, 8),
+                            'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                         }
                     else:
-                        # Just the board
+                        # Just treat the whole thing as a board
                         fixed_obs = {
-                            'board': np.array(obs_copy).copy(),
+                            'board': np.array(obs_copy),
                             'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                         }
                 else:
-                    # Unknown format - create a dummy observation
-                    logger.warning(f"ObservationDictWrapper.step: Unknown observation format: {type(obs)}")
+                    # Unknown format, create dummy observation
                     fixed_obs = {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
                         'action_mask': np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
                     }
-                
-                obs = fixed_obs
             
-            # Check if the observation is missing required keys
-            if 'board' not in obs or 'action_mask' not in obs:
-                logger.warning(f"ObservationDictWrapper.step: Missing keys in observation: {obs.keys()}")
-                # Add any missing keys
-                if 'board' not in obs:
-                    obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
-                if 'action_mask' not in obs:
-                    obs['action_mask'] = np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
+            # Ensure all required keys are present
+            if 'board' not in fixed_obs:
+                fixed_obs['board'] = np.zeros((13, 8, 8), dtype=np.float32)
+            if 'action_mask' not in fixed_obs:
+                fixed_obs['action_mask'] = np.ones(20480, dtype=np.float32)  # Updated from 4672 to 20480
             
-            # Return in the appropriate format based on what was received
-            if len(step_result) == 5:  # Gymnasium API
-                return obs, reward, done, truncated, info
-            else:  # Older API
-                return obs, reward, done, info
-                
+            # Return in the appropriate format based on what we received
+            if len(step_result) == 5:  # Modern Gymnasium API
+                return fixed_obs, reward, done, truncated, info
+            else:  # Classic Gym API
+                return fixed_obs, reward, done, info
         except Exception as e:
             logger.error(f"ObservationDictWrapper.step: Error: {e}", exc_info=True)
             # Return a safe fallback
@@ -1033,63 +987,33 @@ def train(args):
     
     # Set up directory for checkpoints
     checkpoint_dir = Path(args.checkpoint_dir)
-    checkpoint_dir.mkdir(exist_ok=True, parents=True)
+    checkpoint_dir.mkdir(exist_ok=True)
     
-    logger.info(f"Starting training with args: {args}")
-    
-    # Set device
+    # Determine device to use
     device = args.device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        if device == 'cpu' and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            device = 'mps'  # Use Metal Performance Shaders on Apple Silicon
-    
-    logger.info(f"Using device: {device}")
+    if args.force_cpu:
+        logger.info("Forcing CPU use as requested")
+        device = 'cpu'
+
+    logger.info(f"Starting Ray A3C in train mode on {device}")
     
     # Create parameter server
-    checkpoint_path = args.checkpoint if args.checkpoint else None
-    param_server = ParameterServer.remote(device=device, checkpoint_path=checkpoint_path)
+    param_server = ParameterServer.remote(device=device, checkpoint_path=args.checkpoint)
     
     # Create workers
     workers = []
+    logger.info(f"Creating {args.num_workers} workers")
     
-    # Determine if we're in a distributed environment
-    is_distributed = args.distributed if hasattr(args, 'distributed') else False
-    is_head = args.head if hasattr(args, 'head') else False
-    
-    # Worker setup strategy depends on our environment
-    hostname = socket.gethostname()
-    is_lambda = hostname.startswith('lambda-')
-    is_mac = platform.system() == 'Darwin'
-    
-    # Adjust worker count based on environment
-    num_workers = args.num_workers
-    if is_distributed:
-        if is_head and is_lambda:
-            # On Lambda head node with distributed mode: Create fewer workers to leave resources for other nodes
-            logger.info("Running as Lambda head node in distributed mode")
-            num_workers = max(1, num_workers // 2)
-        elif not is_head:
-            # On worker node: Adjust based on resources
-            if is_mac:
-                # On Mac worker: Use fewer workers to avoid overloading
-                logger.info("Running as Mac worker node")
-                num_workers = max(1, os.cpu_count() - 2)
-            else:
-                logger.info(f"Running as worker node on {hostname}")
-    
-    logger.info(f"Creating {num_workers} workers")
-    
-    for i in range(num_workers):
-        # Select appropriate device for this worker
-        worker_device = device
+    for i in range(args.num_workers):
+        # Set worker device
+        if device == 'cuda' and torch.cuda.is_available():
+            worker_device = f'cuda:{i % torch.cuda.device_count()}' if torch.cuda.device_count() > 1 else 'cuda:0'
+        else:
+            worker_device = device
         
-        # Resource specification for Ray remote workers
+        # Set up worker resource requirements
         worker_kwargs = {}
-        
-        # If using multiple GPUs, assign workers to different GPUs
         if device == 'cuda' and torch.cuda.device_count() > 1:
-            worker_device = f'cuda:{i % torch.cuda.device_count()}'
             worker_kwargs['num_gpus'] = 0.5  # Each worker uses 0.5 GPU
         elif device == 'cuda':
             worker_kwargs['num_gpus'] = 0.25  # Share GPU
@@ -1168,7 +1092,7 @@ def train(args):
                 
                 # Get results from the completed task
                 try:
-                    processed_buffer, complete_episode, metrics = ray.get(ready_ids[0])
+                    processed_buffer, complete_episode, metrics, num_moves = ray.get(ready_ids[0])
                 except Exception as e:
                     logger.error(f"Error getting results from worker: {str(e)}", exc_info=True)
                     # Create dummy results
@@ -1182,6 +1106,7 @@ def train(args):
                     }
                     complete_episode = True
                     metrics = {}
+                    num_moves = 0
                 
                 # Skip if buffer is empty
                 if not processed_buffer or 'obs' not in processed_buffer or len(processed_buffer['obs']) == 0:
@@ -1199,8 +1124,9 @@ def train(args):
                 # Update metrics with loss metrics
                 metrics.update(loss_metrics)
                 
-                # Apply gradients to parameter server
+                # Apply gradients to parameter server and update move counter
                 ray.get(param_server.apply_gradients.remote(gradients, metrics))
+                ray.get(param_server.increment_total_moves.remote(num_moves))
             
             # Launch weight updates asynchronously but don't wait for them
             update_tasks = [worker.update_weights.remote() for worker in workers]
@@ -1220,6 +1146,7 @@ def train(args):
                 summary = {
                     'iteration': iteration,
                     'elapsed_time': elapsed_time,
+                    'total_moves': metrics.get('total_moves', 0),
                     'games_played': metrics.get('games', 0),
                     'white_win_rate': metrics.get('white_win_rate', 0),
                     'black_win_rate': metrics.get('black_win_rate', 0),
@@ -1232,11 +1159,6 @@ def train(args):
                 
                 # Log summary
                 logger.info(f"Iteration {iteration}: {summary}")
-                
-                # Save metrics to JSON
-                metrics_path = checkpoint_dir / f"metrics_iter_{iteration}.json"
-                with open(metrics_path, 'w') as f:
-                    json.dump(metrics, f)
             
             # Stop if max iterations reached
             if args.max_iterations and iteration >= args.max_iterations:
