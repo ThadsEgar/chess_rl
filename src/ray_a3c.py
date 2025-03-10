@@ -56,6 +56,9 @@ class ParameterServer:
         
         self.model.to(self.device)
         
+        # Initialize optimizer
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        
         # Load checkpoint if provided
         if checkpoint_path:
             self.load_checkpoint(checkpoint_path)
@@ -74,6 +77,9 @@ class ParameterServer:
             'games': 0,
             'total_moves': 0,  # Track total moves across all environments
         }
+        
+        # Current model version
+        self.version = 0
         
         # Training hyperparameters
         self.gamma = 0.99
