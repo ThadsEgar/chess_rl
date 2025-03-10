@@ -660,7 +660,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             policy=CNNMCTSActorCriticPolicy,
             tensorboard_log=tensorboard_log, 
             verbose=1,
-            learning_rate=3e-5,
+            learning_rate=1e-5,
             n_steps=n_steps,        # Steps to collect per environment
             batch_size=batch_size,  # Batch size for updates
             n_epochs=4,             # Number of passes through the batch
@@ -678,7 +678,7 @@ def create_cnn_mcts_ppo(env, tensorboard_log, device='cpu', checkpoint=None):
             tensorboard_log=tensorboard_log,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            learning_rate=3e-5,
+            learning_rate=1e-5,
             n_steps=n_steps,
             batch_size=batch_size,
             n_epochs=4, 
