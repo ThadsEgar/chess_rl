@@ -389,6 +389,18 @@ def create_rllib_chess_env(config):
 
 def train(args):
     """Main training function using RLlib PPO"""
+    # Optimize PyTorch memory usage for CUDA
+    if args.device == "cuda" and not args.force_cpu:
+        # Enable TensorFloat32 for faster computation on Ampere GPUs
+        import torch
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        # Set memory allocation strategy to reduce fragmentation
+        import os
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
+        print("🚀 Enabled PyTorch CUDA optimizations")
+    
     # Initialize Ray
     if args.redis_password:
         ray.init(
@@ -423,7 +435,6 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=1,
-        # Update metric name to match what's actually reported in the results
         metric="env_runners/episode_reward_mean", 
         mode="max",
         config={
@@ -442,9 +453,9 @@ def train(args):
             "gamma": 0.99,
             "lambda": 0.95,
             "kl_coeff": 0.2,
-            "train_batch_size": 60000,    # Increased from 4000 for better GPU utilization
-            "sgd_minibatch_size": 2000,   # Increased from 128 for better GPU utilization
-            "num_sgd_iter": 10,           # Reduced from 30 to prevent overfitting and speed up training
+            "train_batch_size": 16384,   # Increased while keeping memory optimizations
+            "sgd_minibatch_size": 1024,  # Larger but still manageable
+            "num_sgd_iter": 5,           # Fewer SGD iterations for speed
             "lr": 3e-4,
             "clip_param": 0.2,
             "vf_clip_param": 10.0,
@@ -461,22 +472,25 @@ def train(args):
             # Add extra options to help with initialization
             "create_env_on_driver": True,
             "normalize_actions": False,
-            "log_level": "DEBUG",  # Changed from DEBUG to reduce verbosity
+            "log_level": "WARN",  # Reduced logging to improve performance
             # Worker configuration to ensure observation space is correctly initialized
             "remote_worker_envs": False,
             "restart_failed_env_runners": True,
             "restart_failed_sub_environments": True,
-            
+            "buffer_options": {
+                "reuse_when_possible": True,  # Reuse tensors to reduce memory pressure
+            },
             # Increase episode length limits to allow games to complete
             "horizon": 1000,  # Maximum steps per episode - chess games need time to finish
             "soft_horizon": False,  # Don't reset environments mid-game
             
-            # Rollout settings to encourage game completion
-            "rollout_fragment_length": "auto",  # Increased from 200 for more complete games per rollout
-            "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
+            # Rollout settings for faster iteration
+            "rollout_fragment_length": 128,  # Smaller fragments for more frequent updates
+            "batch_mode": "truncate_episodes",  # Allow episode truncation for speed
             
-            # Optimize CPU usage
-            "num_envs_per_env_runner": 4,        # Each worker runs multiple environments in parallel
+            # Single-system optimization
+            "num_envs_per_env_runner": 2,  # Reduce to lower memory usage
+            "num_env_runners_per_worker": 1,
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
