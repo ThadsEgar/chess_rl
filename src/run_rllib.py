@@ -468,6 +468,7 @@ def train(args):
             "vf_clip_param": 10.0,
             "entropy_coeff": 0.01,
             "vf_loss_coeff": 0.5,
+            "exploration_config": {},
             # Register our custom callbacks
             "callbacks": ChessMetricsCallback,
             # Completely bypass validation
@@ -476,6 +477,8 @@ def train(args):
             "_disable_execution_plan_api": True,
             "_skip_validate_config": True,
             "enable_rl_module_and_learner": False,
+            "_enable_rl_module_api": False,
+            "_enable_learner_api": False,
             # Add extra options to help with initialization
             "create_env_on_driver": True,
             "normalize_actions": False,
