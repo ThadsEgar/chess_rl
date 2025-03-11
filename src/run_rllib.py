@@ -697,13 +697,13 @@ def train(args):
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=max(1, args.checkpoint_interval),  # Save 5x more frequently for zero-sum games
+        checkpoint_freq=10,  # Save every single iteration
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
         metric="episode_reward_mean",
         mode="max",
-        resume=args.checkpoint,  # Enable checkpoint resumption
+        resume=True,  # Enable checkpoint resumption
         config=config,
     )
     
@@ -750,8 +750,6 @@ def main():
                         help="How often to save checkpoints (iterations)")
     parser.add_argument("--render", action="store_true", 
                         help="Render environment during evaluation")
-    parser.add_argument("--fresh_start", action="store_true", 
-                        help="Start training from scratch")
     parser.add_argument("--inference_mode", choices=["cpu", "gpu"], default="gpu", 
                         help="Inference mode: cpu or gpu")
     parser.add_argument("--entropy_coeff", type=float, default=0.01, 

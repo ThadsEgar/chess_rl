@@ -273,7 +273,7 @@ class ChessEnv(gym.Env):
         self.done = False
         self.reward = 0
         self.move_count = 0
-        self.max_moves = 500  # Limit games to 500 moves (1000 plies) to prevent infinite games
+        self.max_moves = 150  # Limit games to 150 moves (150 plies) to prevent infinite games
     
     def reset(self, seed=None, options=None):
         """Reset the environment to start a new game."""
