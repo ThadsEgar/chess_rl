@@ -470,6 +470,11 @@ def train(args):
             "framework": "torch",
             "disable_env_checking": True,
             
+            # Explicitly disable RLModule API to use custom model
+            "_enable_rl_module_api": False,
+            "_enable_learner_api": False,
+            "enable_rl_module_and_learner": False,
+            
             # Basic resource allocation
             "num_cpus_for_driver": driver_cpus,
             "num_workers": num_workers,
