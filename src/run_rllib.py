@@ -52,6 +52,16 @@ class ChessMetricsCallback(DefaultCallbacks):
         episode.custom_metrics["black_win"] = 0.0
         episode.custom_metrics["draw"] = 0.0
         episode.custom_metrics["game_completed"] = 0.0
+        episode.custom_metrics["moves"] = 0.0
+        
+        # Initialize all termination metrics to 0
+        episode.custom_metrics["term_white_checkmate"] = 0.0
+        episode.custom_metrics["term_black_checkmate"] = 0.0
+        episode.custom_metrics["term_stalemate"] = 0.0
+        episode.custom_metrics["term_insufficient"] = 0.0
+        episode.custom_metrics["term_fifty_move"] = 0.0
+        episode.custom_metrics["term_repetition"] = 0.0
+        episode.custom_metrics["term_move_limit"] = 0.0
         
         # Increment appropriate counter based on outcome
         if "game_outcome" in info:
@@ -68,9 +78,28 @@ class ChessMetricsCallback(DefaultCallbacks):
                 self.episode_draws = 1
                 episode.custom_metrics["draw"] = 1.0
             
-            # Add debug info
-            episode.custom_metrics["termination_reason"] = info.get("termination_reason", "unknown")
-            episode.custom_metrics["move_count"] = info.get("move_count", 0)
+            # Add move count as a numeric metric
+            if "move_count" in info:
+                episode.custom_metrics["moves"] = float(info.get("move_count", 0))
+                
+            # Code different termination reasons as numeric values
+            if "termination_reason" in info:
+                reason = info["termination_reason"]
+                # Map termination reasons to numeric codes (1-6)
+                if reason == "white_checkmate":
+                    episode.custom_metrics["term_white_checkmate"] = 1.0
+                elif reason == "black_checkmate":
+                    episode.custom_metrics["term_black_checkmate"] = 1.0
+                elif reason == "stalemate":
+                    episode.custom_metrics["term_stalemate"] = 1.0
+                elif reason == "insufficient_material":
+                    episode.custom_metrics["term_insufficient"] = 1.0
+                elif reason == "fifty_move_rule":
+                    episode.custom_metrics["term_fifty_move"] = 1.0
+                elif reason == "threefold_repetition":
+                    episode.custom_metrics["term_repetition"] = 1.0
+                elif reason == "move_limit_exceeded":
+                    episode.custom_metrics["term_move_limit"] = 1.0
     
     def on_train_result(self, *, algorithm, result, **kwargs):
         """Called after each training iteration, to log chess statistics"""
@@ -391,7 +420,7 @@ def train(args):
             "kl_coeff": 0.2,
             "train_batch_size": 16000,    # Increased from 4000 for better GPU utilization
             "sgd_minibatch_size": 2000,   # Increased from 128 for better GPU utilization
-            "num_sgd_iter": 30,
+            "num_sgd_iter": 10,           # Reduced from 30 to prevent overfitting and speed up training
             "lr": 3e-4,
             "clip_param": 0.2,
             "vf_clip_param": 10.0,
@@ -419,8 +448,12 @@ def train(args):
             "soft_horizon": False,  # Don't reset environments mid-game
             
             # Rollout settings to encourage game completion
-            "rollout_fragment_length": 200,  # Collect this many steps per rollout
+            "rollout_fragment_length": 500,  # Increased from 200 for more complete games per rollout
             "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
+            
+            # Optimize CPU usage
+            "num_envs_per_worker": 2,        # Each worker runs multiple environments in parallel
+            "num_env_runners_per_worker": 1, # Keep one runner per worker for stability
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
