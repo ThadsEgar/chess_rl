@@ -46,6 +46,7 @@ class ChessMetricsCallback(DefaultCallbacks):
         
         # Get info dict from the episode
         info = episode.last_info_for()
+        print(info)
         
         # Only count completed games (where we have a game_outcome)
         if "game_outcome" in info:
@@ -405,7 +406,7 @@ def train(args):
             # Add extra options to help with initialization
             "create_env_on_driver": True,
             "normalize_actions": False,
-            "log_level": "INFO",  # Changed from DEBUG to reduce verbosity
+            "log_level": "DEBUG",  # Changed from DEBUG to reduce verbosity
             # Worker configuration to ensure observation space is correctly initialized
             "remote_worker_envs": False,
             "restart_failed_env_runners": True,
