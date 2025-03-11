@@ -264,7 +264,13 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                 action_mask = action_mask.unsqueeze(0)
                 
             # Ensure mask values are 0 or 1
-            inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -FLOAT_MAX
+            if isinstance(action_mask, np.ndarray):
+                # Convert numpy array to torch tensor
+                action_mask_tensor = torch.FloatTensor(action_mask).to(self.device)
+                inf_mask = torch.clamp(1 - action_mask_tensor, min=0, max=1) * -FLOAT_MAX
+            else:
+                # Already a torch tensor
+                inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -FLOAT_MAX
             
             # Apply the mask to the logits
             masked_logits = action_logits + inf_mask
@@ -303,7 +309,7 @@ def create_rllib_chess_env(config):
                     # Define the correct observation space as Dict
                     self.observation_space = spaces.Dict({
                         'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32)
+                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.int8)
                     })
                 
                 def reset(self, **kwargs):
@@ -345,7 +351,7 @@ def create_rllib_chess_env(config):
                     print(f"WARNING: Could not process observation of type {type(obs)}, returning default observation")
                     return {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
-                        'action_mask': np.ones(env.action_space.n, dtype=np.float32)
+                        'action_mask': np.ones(env.action_space.n, dtype=np.int8)
                     }
             
             # Apply our custom wrapper
@@ -371,18 +377,18 @@ def create_rllib_chess_env(config):
                 self.action_space = spaces.Discrete(20480)
                 self.observation_space = spaces.Dict({
                     'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-                    'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32)
+                    'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.int8)
                 })
             
             def reset(self, **kwargs):
                 return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
-                        'action_mask': np.ones(20480, dtype=np.float32)}, {}
+                        'action_mask': np.ones(20480, dtype=np.int8)}, {}
             
             def step(self, action):
                 # Return a default observation with the correct Gymnasium API format
                 # (obs, reward, terminated, truncated, info)
                 return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
-                        'action_mask': np.ones(20480, dtype=np.float32)}, 0, True, False, {}
+                        'action_mask': np.ones(20480, dtype=np.int8)}, 0, True, False, {}
         
         return PlaceholderEnv()
 
@@ -439,6 +445,7 @@ def train(args):
         mode="max",
         config={
             "env": "chess_env",
+            "disable_env_checking": True,
             "framework": "torch",
             "num_workers": args.num_workers,
             "num_gpus": 4 if args.device == "cuda" and not args.force_cpu else 0,
