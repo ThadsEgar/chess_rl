@@ -59,11 +59,30 @@ class ChessMetricsCallback(DefaultCallbacks):
         # Handle the case where last_info is None (which can happen with some environment errors)
         if last_info is None:
             print(f"Warning: last_info is None for episode {episode.episode_id}, env_index {env_index}")
-            # Set default outcome
+            # Try to get some info from the episode
             outcome = "unknown"
+            
+            # See if we can get termination info from the episode length
+            if episode.length >= 150:  # Check if we reached move limit
+                print(f"   Episode reached max length ({episode.length}), likely terminated due to move limit")
+                outcome = "draw"  # Assume draw if we reach the move limit
         else:
             # Extract outcome from info, defaulting to "unknown" if not present
             outcome = last_info.get("outcome", "unknown")
+            
+            # If outcome is still unknown, try other fields
+            if outcome == "unknown" and "game_outcome" in last_info:
+                outcome = last_info.get("game_outcome")
+            
+            # If still unknown but we know it's a draw, set to draw
+            if outcome == "unknown" and last_info.get("draw", False):
+                outcome = "draw"
+        
+        # Print diagnostic info for debugging
+        if outcome == "unknown":
+            print(f"Unknown outcome for episode {episode.episode_id}, length: {episode.length}, reward: {episode.total_reward}")
+            if last_info is not None:
+                print(f"   Available info keys: {list(last_info.keys())}")
         
         episode_id = episode.episode_id
         
@@ -459,8 +478,27 @@ def create_rllib_chess_env(config):
                 """Ensure the info dictionary has the required fields"""
                 if info is None:
                     info = {}
+                
+                # Ensure outcome is always present
                 if "outcome" not in info:
-                    info["outcome"] = "unknown"
+                    # If game_outcome exists, use that
+                    if "game_outcome" in info:
+                        info["outcome"] = info["game_outcome"]
+                    else:
+                        info["outcome"] = "unknown"
+                
+                # Ensure game_outcome is always present
+                if "game_outcome" not in info:
+                    # If outcome exists, use that
+                    if "outcome" in info:
+                        info["game_outcome"] = info["outcome"]
+                    else:
+                        info["game_outcome"] = "unknown"
+                
+                # Add termination_reason if not present
+                if "termination_reason" not in info:
+                    info["termination_reason"] = "unknown"
+                
                 return info
                     
         # Always apply the wrapper to ensure consistent observation format

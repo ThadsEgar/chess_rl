@@ -371,6 +371,7 @@ class ChessEnv(gym.Env):
                 reward = 0.0
                 info["draw"] = True
                 info["game_outcome"] = "draw"
+                info["outcome"] = "draw"
                 info["termination_reason"] = "move_limit_exceeded"
                 
             # Update state
