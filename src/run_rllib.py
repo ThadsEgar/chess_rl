@@ -25,145 +25,96 @@ from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 
 torch, nn = try_import_torch()
 
-# Define a Ray actor to track statistics across workers
-@ray.remote
-class StatsTracker:
-    def __init__(self):
-        self.white_wins = 0
-        self.black_wins = 0
-        self.draws = 0
-        self.total_games = 0
-        self.total_episodes = 0
-        self.completed_episodes = 0
-    
-    def increment_white_wins(self):
-        self.white_wins += 1
-        return self.white_wins
-    
-    def increment_black_wins(self):
-        self.black_wins += 1
-        return self.black_wins
-    
-    def increment_draws(self):
-        self.draws += 1
-        return self.draws
-    
-    def increment_total_episodes(self):
-        self.total_episodes += 1
-        return self.total_episodes
-    
-    def increment_completed_episodes(self):
-        self.completed_episodes += 1
-        return self.completed_episodes
-    
-    def get_stats(self):
-        return {
-            "white_wins": self.white_wins,
-            "black_wins": self.black_wins,
-            "draws": self.draws,
-            "total_games": self.white_wins + self.black_wins + self.draws,
-            "total_episodes": self.total_episodes,
-            "completed_episodes": self.completed_episodes
-        }
-
 # Define a custom callback to track chess game statistics
 class ChessMetricsCallback(DefaultCallbacks):
     """Custom callbacks for tracking chess game statistics"""
     
     def __init__(self):
         super().__init__()
-        # This will be initialized in setup
-        self.stats_tracker = None
-    
-    def setup(self, *, worker=None, algorithm=None, **kwargs):
-        """Initialize the Ray actor for tracking stats"""
-        # Initialize on workers
-        if worker is not None and worker.worker_index == 0:
-            # Only create the actor on the first worker
-            if not hasattr(worker, "stats_tracker"):
-                worker.stats_tracker = StatsTracker.remote()
-            # Get a reference to the stats tracker
-            self.stats_tracker = worker.stats_tracker
-        
-        # Initialize on algorithm
-        elif algorithm is not None and kwargs.get("setup_stats_tracker", False):
-            if not hasattr(algorithm, "stats_tracker"):
-                # Create the actor or get a reference to the existing one
-                try:
-                    # Try to find existing StatsTracker actors
-                    actors = [a for a in ray.state.actors().values() 
-                              if a["ActorClass"] == "StatsTracker"]
-                    if actors:
-                        # Use existing actor
-                        actor_id = list(actors)[0]["ActorID"]
-                        algorithm.stats_tracker = ray.get_actor(actor_id)
-                    else:
-                        # Create new actor
-                        algorithm.stats_tracker = StatsTracker.remote()
-                except:
-                    # Fallback to creating a new actor
-                    algorithm.stats_tracker = StatsTracker.remote()
-            # Set the reference on this callback
-            self.stats_tracker = algorithm.stats_tracker
+        # These variables won't be used for tracking across processes
+        # They'll just be used for tracking during one worker's lifetime
+        self.episode_white_wins = 0
+        self.episode_black_wins = 0
+        self.episode_draws = 0
     
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         """Called when an episode ends, to track game outcomes"""
-        if self.stats_tracker is None:
-            return
-            
-        # Increment episode counter
-        ray.get(self.stats_tracker.increment_total_episodes.remote())
+        # Reset counters for this episode
+        self.episode_white_wins = 0
+        self.episode_black_wins = 0
+        self.episode_draws = 0
         
         # Get info dict from the episode
         info = episode.last_info_for()
         
-        # Only count completed games (where we have a game_outcome)
+        # Set all metrics to 0 by default
+        episode.custom_metrics["white_win"] = 0.0
+        episode.custom_metrics["black_win"] = 0.0
+        episode.custom_metrics["draw"] = 0.0
+        episode.custom_metrics["game_completed"] = 0.0
+        
+        # Increment appropriate counter based on outcome
         if "game_outcome" in info:
-            ray.get(self.stats_tracker.increment_completed_episodes.remote())
+            episode.custom_metrics["game_completed"] = 1.0
             game_outcome = info["game_outcome"]
             
-            # Initialize metrics
-            episode.custom_metrics["white_win"] = 0.0
-            episode.custom_metrics["black_win"] = 0.0
-            episode.custom_metrics["draw"] = 0.0
-            
-            # Increment appropriate counter based on outcome
             if game_outcome == "white_win":
-                ray.get(self.stats_tracker.increment_white_wins.remote())
+                self.episode_white_wins = 1
                 episode.custom_metrics["white_win"] = 1.0
             elif game_outcome == "black_win":
-                ray.get(self.stats_tracker.increment_black_wins.remote())
+                self.episode_black_wins = 1
                 episode.custom_metrics["black_win"] = 1.0
             elif game_outcome == "draw":
-                ray.get(self.stats_tracker.increment_draws.remote())
+                self.episode_draws = 1
                 episode.custom_metrics["draw"] = 1.0
-                
-        # Add episode metrics
-        episode.custom_metrics["episode_completed"] = 1.0 if "game_outcome" in info else 0.0
+            
+            # Add debug info
+            episode.custom_metrics["termination_reason"] = info.get("termination_reason", "unknown")
+            episode.custom_metrics["move_count"] = info.get("move_count", 0)
     
     def on_train_result(self, *, algorithm, result, **kwargs):
         """Called after each training iteration, to log chess statistics"""
-        if not hasattr(algorithm, "stats_tracker") or algorithm.stats_tracker is None:
-            return
-            
-        # Get stats from the centralized tracker
-        stats = ray.get(algorithm.stats_tracker.get_stats.remote())
+        custom_metrics = result.get("custom_metrics", {})
         
-        # Print a minimal summary
+        # Extract metrics for the current iteration
+        white_wins = custom_metrics.get("white_win_mean", 0) * result.get("episodes_this_iter", 0)
+        black_wins = custom_metrics.get("black_win_mean", 0) * result.get("episodes_this_iter", 0)
+        draws = custom_metrics.get("draw_mean", 0) * result.get("episodes_this_iter", 0)
+        completed = custom_metrics.get("game_completed_mean", 0) * result.get("episodes_this_iter", 0)
+        
+        # Add to total wins
+        if not hasattr(algorithm, "total_white_wins"):
+            algorithm.total_white_wins = 0
+            algorithm.total_black_wins = 0
+            algorithm.total_draws = 0
+            algorithm.total_completed_games = 0
+            algorithm.total_episodes = 0
+        
+        algorithm.total_white_wins += int(white_wins)
+        algorithm.total_black_wins += int(black_wins)
+        algorithm.total_draws += int(draws)
+        algorithm.total_completed_games += int(completed)
+        algorithm.total_episodes += result.get("episodes_this_iter", 0)
+        
+        # Print a summary
         print("\n----- Chess Stats -----")
-        print(f"W/B/D: {stats['white_wins']}/{stats['black_wins']}/{stats['draws']}")
-            
-        # Calculate completion rate
-        if stats['total_episodes'] > 0:
-            completion_rate = stats['completed_episodes'] / stats['total_episodes'] * 100
-            print(f"Completion: {completion_rate:.1f}%")
-        print("----------------------\n")
+        print(f"White Wins: {algorithm.total_white_wins}")
+        print(f"Black Wins: {algorithm.total_black_wins}")
+        print(f"Draws:      {algorithm.total_draws}")
+        print(f"Total Completed Games: {algorithm.total_completed_games}")
         
-        # Add stats to result
-        metrics = result.get("custom_metrics", {})
-        for k, v in stats.items():
-            metrics[k] = v
-        result["custom_metrics"] = metrics
+        # Calculate win percentages (if any games have been completed)
+        if algorithm.total_completed_games > 0:
+            white_win_pct = algorithm.total_white_wins / algorithm.total_completed_games * 100
+            black_win_pct = algorithm.total_black_wins / algorithm.total_completed_games * 100
+            draw_pct = algorithm.total_draws / algorithm.total_completed_games * 100
+            print(f"Win %: White={white_win_pct:.1f}%, Black={black_win_pct:.1f}%, Draw={draw_pct:.1f}%")
+        
+        # Calculate completion rate
+        if algorithm.total_episodes > 0:
+            completion_rate = algorithm.total_completed_games / algorithm.total_episodes * 100
+            print(f"Completion Rate: {completion_rate:.1f}%")
+        print("----------------------\n")
 
 
 class ChessMaskedModel(TorchModelV2, nn.Module):
@@ -422,16 +373,6 @@ def train(args):
         # Update metric name to match what's actually reported in the results
         metric="env_runners/episode_reward_mean", 
         mode="max",
-        callbacks=[
-            # Register a callback to initialize the stats tracker on the algorithm
-            lambda trial: trial.create_default_callbacks()[0].on_algorithm_init(
-                algorithm=trial,
-                callback_cls=lambda: None,  # Dummy callback
-                **{
-                    "setup_stats_tracker": True  # Our custom flag
-                }
-            )
-        ],
         config={
             "env": "chess_env",
             "framework": "torch",
