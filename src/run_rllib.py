@@ -454,6 +454,7 @@ def train(args):
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Using checkpoint directory: {checkpoint_dir}")
     
+    
     # Use a minimalist configuration to avoid conflicts
     config = {
         "env": "chess_env",
