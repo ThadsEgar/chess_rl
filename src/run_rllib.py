@@ -722,7 +722,7 @@ def train(args):
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=1,  # Save every iteration
+        checkpoint_freq=50,  # Save every 50 iteration
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
