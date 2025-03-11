@@ -473,7 +473,7 @@ def train(args):
             "custom_model_config": {"handle_missing_action_mask": True}
         },
         "train_batch_size": 65536,
-        "sgd_minibatch_size": 2096,
+        "sgd_minibatch_size": 4096,
         "num_sgd_iter": 5,
         "lr": 3e-4,
         "callbacks": ChessMetricsCallback,
