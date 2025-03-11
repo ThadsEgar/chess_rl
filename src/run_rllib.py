@@ -468,7 +468,7 @@ def train(args):
                 
     # Override the fixed worker count with command line args if using GPU-accelerated inference
     num_workers = 4  # Default to 4 workers for GPU inference
-    num_envs = 30    # Default to 30 envs per worker
+    num_envs = 29    # Default to 30 envs per worker
     
     # Determine CPUs per worker based on total and worker count
     if args.inference_mode == "cpu" and args.num_workers:

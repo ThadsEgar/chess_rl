@@ -64,7 +64,7 @@ def detect_resources():
         logger.warning("Falling back to CPU mode")
         cuda_available = False
         gpu_count = 0
-    
+     
     # Detect if we're on a Lambda Labs machine with A10 GPU
     on_lambda_a10 = False
     if cuda_available and platform.node().startswith('lambda-'):
