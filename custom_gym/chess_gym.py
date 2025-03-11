@@ -481,6 +481,14 @@ class ActionMaskWrapper(gym.Wrapper):
             'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
         }
         
+        # Ensure info dictionary is initialized with basic information
+        if info is None:
+            info = {}
+            
+        # Add game state info - fresh game
+        info["move_count"] = 0
+        info["game_ongoing"] = True
+        
         return dict_obs, info
         
     def step(self, action):
@@ -500,6 +508,53 @@ class ActionMaskWrapper(gym.Wrapper):
             'action_mask': action_mask,
             'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
         }
+        
+        # Ensure info dictionary is complete, especially for terminal states
+        if terminated or truncated:
+            # If info is None, create an empty dict
+            if info is None:
+                info = {}
+                
+            # Ensure outcome information is present for terminal states
+            if "outcome" not in info:
+                # Try to get game state from environment
+                if hasattr(self.env, 'board'):
+                    board = self.env.board
+                    # Check game state conditions
+                    if board.is_checkmate():
+                        # Who won?
+                        if board.turn:  # Black's turn now, so White won
+                            info["outcome"] = "white_win"
+                            info["game_outcome"] = "white_win"
+                            info["white_won"] = True
+                        else:  # White's turn now, so Black won
+                            info["outcome"] = "black_win"
+                            info["game_outcome"] = "black_win"
+                            info["black_won"] = True
+                    elif board.is_stalemate() or board.is_insufficient_material() or board.is_fifty_moves() or board.is_repetition():
+                        info["outcome"] = "draw"
+                        info["game_outcome"] = "draw"
+                        info["draw"] = True
+                    elif hasattr(self.env, 'move_count') and hasattr(self.env, 'max_moves') and self.env.move_count >= self.env.max_moves:
+                        info["outcome"] = "draw"
+                        info["game_outcome"] = "draw"
+                        info["draw"] = True
+                        info["termination_reason"] = "move_limit_exceeded"
+                    else:
+                        info["outcome"] = "unknown"
+                        info["game_outcome"] = "unknown"
+                else:
+                    # Default to unknown if we can't determine the outcome
+                    info["outcome"] = "unknown"
+                    info["game_outcome"] = "unknown"
+            
+            # Make sure game_outcome is consistent with outcome
+            if "game_outcome" not in info and "outcome" in info:
+                info["game_outcome"] = info["outcome"]
+            
+            # Make sure outcome is consistent with game_outcome
+            if "outcome" not in info and "game_outcome" in info:
+                info["outcome"] = info["game_outcome"]
         
         return dict_obs, reward, terminated, truncated, info
     

@@ -406,10 +406,12 @@ def create_rllib_chess_env(config):
                 if len(result) == 4:  # obs, reward, done, info (old style)
                     obs, reward, done, info = result
                     # Convert to new Gymnasium API (obs, reward, terminated, truncated, info)
-                    return self._wrap_observation(obs), reward, done, False, self._ensure_info(info)
+                    info = self._ensure_info(info)
+                    return self._wrap_observation(obs), reward, done, False, info
                 elif len(result) == 5:  # obs, reward, terminated, truncated, info (new style)
                     obs, reward, terminated, truncated, info = result
-                    return self._wrap_observation(obs), reward, terminated, truncated, self._ensure_info(info)
+                    info = self._ensure_info(info)
+                    return self._wrap_observation(obs), reward, terminated, truncated, info
                 else:
                     # Handle unexpected result format
                     print(f"WARNING: Unexpected step result format with {len(result)} elements")
@@ -481,11 +483,38 @@ def create_rllib_chess_env(config):
                 
                 # Ensure outcome is always present
                 if "outcome" not in info:
-                    # If game_outcome exists, use that
-                    if "game_outcome" in info:
-                        info["outcome"] = info["game_outcome"]
+                    # Try to extract info from the environment if possible
+                    if hasattr(self.env, 'env') and hasattr(self.env.env, 'board'):
+                        # Get direct access to the chess board
+                        board = self.env.env.board
+                        
+                        # Check game state conditions
+                        if board.is_checkmate():
+                            # Who won?
+                            if board.turn:  # Black's turn now, so White won
+                                info["outcome"] = "white_win"
+                                info["game_outcome"] = "white_win"
+                            elif not board.turn:  # White's turn now, so Black won
+                                info["outcome"] = "black_win"
+                                info["game_outcome"] = "black_win"
+                        elif board.is_stalemate() or board.is_insufficient_material() or board.is_fifty_moves() or board.is_repetition():
+                            info["outcome"] = "draw"
+                            info["game_outcome"] = "draw"
+                        elif hasattr(self.env.env, 'move_count') and hasattr(self.env.env, 'max_moves') and self.env.env.move_count >= self.env.env.max_moves:
+                            info["outcome"] = "draw"
+                            info["game_outcome"] = "draw"
+                            info["termination_reason"] = "move_limit_exceeded"
+                        # If game_outcome exists, use that
+                        elif "game_outcome" in info:
+                            info["outcome"] = info["game_outcome"]
+                        else:
+                            info["outcome"] = "unknown"
                     else:
-                        info["outcome"] = "unknown"
+                        # If outcome exists, use that
+                        if "game_outcome" in info:
+                            info["outcome"] = info["game_outcome"]
+                        else:
+                            info["outcome"] = "unknown"
                 
                 # Ensure game_outcome is always present
                 if "game_outcome" not in info:
