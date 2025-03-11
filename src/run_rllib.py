@@ -31,6 +31,10 @@ class ChessMetricsCallback(DefaultCallbacks):
     
     def __init__(self):
         super().__init__()
+        # Import numpy for array operations 
+        import numpy as np
+        self.np = np
+        
         self.win_rates = {"white": [], "black": [], "draw": []}
         self.num_episodes = 0
         self.total_rewards = []
@@ -112,6 +116,9 @@ class ChessMetricsCallback(DefaultCallbacks):
                 # Fallback to alternating turns if field not available
                 is_white_turn.append(len(is_white_turn) % 2 == 0)
         
+        # Convert is_white_turn to numpy array
+        is_white_turn = self.np.array(is_white_turn)
+        
         # Find the final outcome (z) - the reward at terminal state
         # In chess, rewards are sparse and only given at the end of the game
         terminal_reward = None
@@ -128,17 +135,17 @@ class ChessMetricsCallback(DefaultCallbacks):
             return postprocessed_batch
         
         # Calculate value targets for each state in the trajectory
-        value_targets = []
+        # Convert to numpy array to match RLlib's expected format
+        value_targets = self.np.zeros_like(rewards)
+        
         for i, white_turn in enumerate(is_white_turn):
             # Apply correct zero-sum value target:
             # White's turn: value target = terminal_reward (outcome from White's perspective)
             # Black's turn: value target = -terminal_reward (outcome from Black's perspective)
             if white_turn:
-                v_target = terminal_reward  # White's perspective
+                value_targets[i] = terminal_reward  # White's perspective
             else:
-                v_target = -terminal_reward  # Black's perspective flipped
-            
-            value_targets.append(v_target)
+                value_targets[i] = -terminal_reward  # Black's perspective flipped
         
         # Update batch with corrected value targets
         if "value_targets" in postprocessed_batch:
