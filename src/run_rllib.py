@@ -27,80 +27,106 @@ torch, nn = try_import_torch()
 
 # Define a custom callback to track chess game statistics
 class ChessMetricsCallback(DefaultCallbacks):
-    """Custom callbacks for tracking chess game statistics"""
+    """Callback to track chess-specific metrics during training."""
     
     def __init__(self):
         super().__init__()
-        # Initialize counters to zero
-        self.white_wins = 0
-        self.black_wins = 0
-        self.draws = 0
-        self.completed_games = 0
+        self.win_rates = {"white": [], "black": [], "draw": []}
+        self.num_episodes = 0
+        self.total_rewards = []
+        self.episode_lengths = []
+        self.is_white_to_move = {}  # Track which color is to move for each episode
+    
+    def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        # Initialize tracking for which player is to move in this episode
+        episode_id = episode.episode_id
+        self.is_white_to_move[episode_id] = True  # Start with White to move
+    
+    def on_episode_step(self, *, worker, base_env, episode, env_index, **kwargs):
+        # Track player turns - flip after each action
+        episode_id = episode.episode_id
+        if episode_id in self.is_white_to_move:
+            self.is_white_to_move[episode_id] = not self.is_white_to_move[episode_id]
     
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
-        """Called when an episode ends, to track game outcomes"""
-        # Reset counters for this episode
-        self.white_wins = 0
-        self.black_wins = 0
-        self.draws = 0
+        # Get the final outcome (from White's perspective)
+        outcome = episode.last_info_for(env_index).get("outcome", "unknown")
+        episode_id = episode.episode_id
         
-        # Get info dict from the episode
-        info = episode.last_info_for()
-        
-        # Set all metrics to 0 by default
-        episode.custom_metrics["white_win"] = 0.0
-        episode.custom_metrics["black_win"] = 0.0
-        episode.custom_metrics["draw"] = 0.0
-        episode.custom_metrics["game_completed"] = 0.0
-        episode.custom_metrics["moves"] = 0.0
-        
-        # Initialize all termination metrics to 0
-        episode.custom_metrics["term_white_checkmate"] = 0.0
-        episode.custom_metrics["term_black_checkmate"] = 0.0
-        episode.custom_metrics["term_stalemate"] = 0.0
-        episode.custom_metrics["term_insufficient"] = 0.0
-        episode.custom_metrics["term_fifty_move"] = 0.0
-        episode.custom_metrics["term_repetition"] = 0.0
-        episode.custom_metrics["term_move_limit"] = 0.0
-        
-        # Increment appropriate counter based on outcome
-        if "game_outcome" in info:
-            episode.custom_metrics["game_completed"] = 1.0
-            game_outcome = info["game_outcome"]
+        # Record game outcome
+        if outcome == "white_win":
+            self.win_rates["white"].append(1)
+            self.win_rates["black"].append(0)
+            self.win_rates["draw"].append(0)
+        elif outcome == "black_win":
+            self.win_rates["white"].append(0)
+            self.win_rates["black"].append(1)
+            self.win_rates["draw"].append(0)
+        elif outcome == "draw":
+            self.win_rates["white"].append(0)
+            self.win_rates["black"].append(0)
+            self.win_rates["draw"].append(1)
             
-            if game_outcome == "white_win":
-                self.white_wins = 1
-                episode.custom_metrics["white_win"] = 1.0
-            elif game_outcome == "black_win":
-                self.black_wins = 1
-                episode.custom_metrics["black_win"] = 1.0
-            elif game_outcome == "draw":
-                self.draws = 1
-                episode.custom_metrics["draw"] = 1.0
+        # Clean up tracking
+        if episode_id in self.is_white_to_move:
+            del self.is_white_to_move[episode_id]
             
-            # Add move count as a numeric metric
-            if "move_count" in info:
-                episode.custom_metrics["moves"] = float(info.get("move_count", 0))
-                
-            # Code different termination reasons as numeric values
-            if "termination_reason" in info:
-                reason = info["termination_reason"]
-                # Map termination reasons to numeric codes (1-6)
-                if reason == "white_checkmate":
-                    episode.custom_metrics["term_white_checkmate"] = 1.0
-                elif reason == "black_checkmate":
-                    episode.custom_metrics["term_black_checkmate"] = 1.0
-                elif reason == "stalemate":
-                    episode.custom_metrics["term_stalemate"] = 1.0
-                elif reason == "insufficient_material":
-                    episode.custom_metrics["term_insufficient"] = 1.0
-                elif reason == "fifty_move_rule":
-                    episode.custom_metrics["term_fifty_move"] = 1.0
-                elif reason == "threefold_repetition":
-                     episode.custom_metrics["term_repetition"] = 1.0
-                elif reason == "move_limit_exceeded":
-                    episode.custom_metrics["term_move_limit"] = 1.0
-    
+        # Record other episode stats
+        self.num_episodes += 1
+        self.total_rewards.append(episode.total_reward)
+        self.episode_lengths.append(episode.length)
+
+    def on_postprocess_trajectory(self, *, worker, episode, agent_id, policy_id, policies, postprocessed_batch, original_batches, **kwargs):
+        """Critical method for correct advantage calculation in zero-sum chess games.
+        
+        This ensures value targets are properly flipped based on which player (White or Black) is to move.
+        """
+        # Get trajectory data
+        dones = postprocessed_batch["dones"]
+        obs = postprocessed_batch["obs"]
+        rewards = postprocessed_batch["rewards"]
+        
+        # Extract turn information from observations directly
+        is_white_turn = []
+        for observation in obs:
+            # Use the white_to_move field we added to the observation
+            if isinstance(observation, dict) and "white_to_move" in observation:
+                is_white_turn.append(observation["white_to_move"])
+            else:
+                # Fallback to alternating turns if field not available
+                is_white_turn.append(len(is_white_turn) % 2 == 0)
+        
+        # Find the final outcome (z) - the reward at terminal state
+        # In chess, rewards are sparse and only given at the end of the game
+        if any(dones):
+            # Find the first done step
+            for i, done in enumerate(dones):
+                if done:
+                    z = rewards[i]  # This is the final reward from White's perspective
+                    break
+        else:
+            # If no terminal state in this batch, use bootstrap value from the last state
+            z = rewards[-1]
+        
+        # Calculate value targets for each state in the trajectory
+        value_targets = []
+        for i, white_turn in enumerate(is_white_turn):
+            # Apply correct zero-sum value target:
+            # White's turn: value target = z (outcome from White's perspective)
+            # Black's turn: value target = -z (outcome from Black's perspective)
+            if white_turn:
+                v_target = z  # White's perspective
+            else:
+                v_target = -z  # Black's perspective flipped
+            
+            value_targets.append(v_target)
+        
+        # Update batch with corrected value targets
+        if "value_targets" in postprocessed_batch:
+            postprocessed_batch["value_targets"] = value_targets
+        
+        return postprocessed_batch
+
     def on_train_result(self, *, algorithm, result, **kwargs):
         """Called after each training iteration, to log chess statistics"""
         import gc
@@ -289,6 +315,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
         return action_logits, state
         
     def value_function(self):
+        """Return the current value function estimate for the last processed batch."""
         return self._value.squeeze(1)
 
 
@@ -480,6 +507,21 @@ def train(args):
         "create_env_on_driver": True,
         "compress_observations": True,
         "log_level": "INFO",  # Debug startup
+        
+        # Zero-sum game specific settings
+        "gamma": 1.0,  # No temporal discounting for chess (outcome only matters at end)
+        "lambda": 1.0,  # Use Monte Carlo estimate for advantage
+        "use_critic": True,
+        "use_gae": True,
+        "vf_loss_coeff": 1.0,  # Balance policy and value function losses
+        "postprocess_inputs": True,  # Allow our callback to process trajectories
+        "normalize_actions": False,  # Chess actions are discrete and masked
+        
+        # Memory optimization for lower GPU memory usage
+        "_disable_preprocessor_api": False,
+        "rollout_fragment_length": "auto",  # Optimize fragment length
+        "_use_trajectory_view_api": True,  # More memory-efficient view
+        "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
     }
 
     analysis = tune.run(

@@ -310,19 +310,22 @@ class ChessEnv(gym.Env):
                 self.done = True
                 # Who won?
                 if self.board.turn:  # Black's turn now, so White won
-                    reward = 1.0 if self.board.turn == chess.BLACK else -1.0
+                    reward = 1.0  # White win from White's perspective is +1
                     info["white_won"] = True
                     info["game_outcome"] = "white_win"
+                    info["outcome"] = "white_win"
                 else:  # White's turn now, so Black won
-                    reward = 1.0 if self.board.turn == chess.WHITE else -1.0
+                    reward = -1.0  # Black win from White's perspective is -1
                     info["black_won"] = True
                     info["game_outcome"] = "black_win"
+                    info["outcome"] = "black_win"
                     
             elif stalemate or insufficient or fifty_move or repetition:
                 self.done = True
-                reward = 0.0
+                reward = 0.0  # Draw is 0 from any perspective
                 info["draw"] = True
                 info["game_outcome"] = "draw"
+                info["outcome"] = "draw"
                 if stalemate:
                     info["termination_reason"] = "stalemate"
                 elif insufficient:
@@ -378,10 +381,14 @@ class ChessEnv(gym.Env):
             return self._get_obs(), -0.1, False, False, {"message": f"Error: {e}"}
     
     def _get_obs(self):
-        """Get the current observation."""
+        """Returns the current observation."""
+        board_state = encode_board(self.state)
+        action_mask = self._get_action_mask()
+        
         return {
-            'board': canonical_encode_board_for_cnn(self.state),
-            'action_mask': self._get_action_mask()
+            'board': board_state,
+            'action_mask': action_mask,
+            'white_to_move': not self.board.turn  # chess.BLACK is True, chess.WHITE is False
         }
     
     def _get_action_mask(self):
