@@ -455,52 +455,43 @@ def train(args):
     print(f"Using checkpoint directory: {checkpoint_dir}")
     
     # Use a minimalist configuration to avoid conflicts
+    config = {
+        "env": "chess_env",
+        "framework": "torch",
+        "disable_env_checking": True,
+        "_enable_rl_module_api": False,
+        "_enable_learner_api": False,
+        "num_cpus_for_driver": driver_cpus,
+        "num_workers": num_workers,
+        "num_cpus_per_worker": cpus_per_worker,
+        "num_gpus": 1,  # Driver uses 1 GPU
+        "num_gpus_per_worker": 0.5,  # Workers share remaining GPUs
+        "num_envs_per_worker": num_envs,
+        "model": {
+            "custom_model": "chess_masked_model",
+            "custom_model_config": {"handle_missing_action_mask": True}
+        },
+        "train_batch_size": 4000,
+        "sgd_minibatch_size": 128,
+        "num_sgd_iter": 4,
+        "lr": 3e-4,
+        "callbacks": ChessMetricsCallback,
+        "create_env_on_driver": True,
+        "compress_observations": True,
+        "log_level": "INFO",  # Debug startup
+    }
+
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
         checkpoint_freq=args.checkpoint_interval,
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
-        verbose=1,
-        metric="episode_reward_mean", 
+        verbose=2,  # Detailed output
+        metric="episode_reward_mean",
         mode="max",
-        resume=None,  # Explicitly start a new run
-        config={
-            "env": "chess_env",
-            "framework": "torch",
-            "disable_env_checking": True,
-            
-            # Explicitly disable RLModule API to use custom model
-            "_enable_rl_module_api": False,
-            "_enable_learner_api": False,
-            
-            # Basic resource allocation
-            "num_cpus_for_driver": driver_cpus,
-            "num_workers": num_workers,
-            "num_cpus_per_worker": cpus_per_worker,
-            "num_gpus": 1,
-            "num_gpus_per_worker": 0.75,
-            "num_envs_per_worker": num_envs,
-            
-            # Model configuration
-            "model": {
-                "custom_model": "chess_masked_model",
-                "custom_model_config": {
-                    "handle_missing_action_mask": True,
-                }
-            },
-            
-            # PPO configuration - keep it minimal
-            "train_batch_size": 4000,  # Much smaller batch size
-            "sgd_minibatch_size": 128,  # Smaller minibatches
-            "num_sgd_iter": 4,
-            "lr": 3e-4,
-            
-            # Only essential settings - no API flags
-            "callbacks": ChessMetricsCallback,
-            "create_env_on_driver": True,
-            "compress_observations": True,
-        }
+        resume=None,
+        config=config,
     )
     
     # Get best checkpoint
