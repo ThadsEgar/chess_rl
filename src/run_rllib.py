@@ -86,38 +86,42 @@ class ChessMetricsCallback(DefaultCallbacks):
         obs = postprocessed_batch["obs"]
         rewards = postprocessed_batch["rewards"]
         
-        # Extract turn information from observations directly
+        # Extract turn information from observations
         is_white_turn = []
         for observation in obs:
             # Use the white_to_move field we added to the observation
             if isinstance(observation, dict) and "white_to_move" in observation:
-                is_white_turn.append(observation["white_to_move"])
+                # Convert to boolean (0=False, 1=True)
+                is_white_turn.append(bool(observation["white_to_move"]))
             else:
                 # Fallback to alternating turns if field not available
                 is_white_turn.append(len(is_white_turn) % 2 == 0)
         
         # Find the final outcome (z) - the reward at terminal state
         # In chess, rewards are sparse and only given at the end of the game
+        terminal_reward = None
         if any(dones):
             # Find the first done step
             for i, done in enumerate(dones):
                 if done:
-                    z = rewards[i]  # This is the final reward from White's perspective
+                    terminal_reward = rewards[i]  # This is the final reward from White's perspective
                     break
-        else:
-            # If no terminal state in this batch, use bootstrap value from the last state
-            z = rewards[-1]
+        
+        # If no terminal reward in this batch, we can't properly set value targets
+        if terminal_reward is None:
+            # Skip processing if there's no terminal state
+            return postprocessed_batch
         
         # Calculate value targets for each state in the trajectory
         value_targets = []
         for i, white_turn in enumerate(is_white_turn):
             # Apply correct zero-sum value target:
-            # White's turn: value target = z (outcome from White's perspective)
-            # Black's turn: value target = -z (outcome from Black's perspective)
+            # White's turn: value target = terminal_reward (outcome from White's perspective)
+            # Black's turn: value target = -terminal_reward (outcome from Black's perspective)
             if white_turn:
-                v_target = z  # White's perspective
+                v_target = terminal_reward  # White's perspective
             else:
-                v_target = -z  # Black's perspective flipped
+                v_target = -terminal_reward  # Black's perspective flipped
             
             value_targets.append(v_target)
         
@@ -345,7 +349,8 @@ def create_rllib_chess_env(config):
                     # Define the correct observation space as Dict
                     self.observation_space = spaces.Dict({
                         'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.int8)
+                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.int8),
+                        'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
                     })
                 
                 def reset(self, **kwargs):
@@ -374,21 +379,35 @@ def create_rllib_chess_env(config):
                 def _wrap_observation(self, obs):
                     # Convert observation to Dict format if it's not already
                     if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
-                        return obs
-                    elif isinstance(obs, np.ndarray):
-                        # Split array into board and mask components
-                        board_size = 13 * 8 * 8  # Standard chess board size
-                        if len(obs.shape) == 1 and obs.shape[0] > board_size:
-                            board = obs[:board_size].reshape(13, 8, 8)
-                            action_mask = obs[board_size:]
-                            return {'board': board, 'action_mask': action_mask}
-                    
-                    # If we can't process the observation properly, return default
-                    print(f"WARNING: Could not process observation of type {type(obs)}, returning default observation")
-                    return {
-                        'board': np.zeros((13, 8, 8), dtype=np.float32),
-                        'action_mask': np.ones(env.action_space.n, dtype=np.int8)
-                    }
+                        # If observation already has white_to_move field, use it
+                        if 'white_to_move' in obs:
+                            return {
+                                'board': obs['board'],
+                                'action_mask': obs['action_mask'],
+                                'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
+                            }
+                        else:
+                            # Add a default white_to_move (assuming White's turn)
+                            return {
+                                'board': obs['board'],
+                                'action_mask': obs['action_mask'],
+                                'white_to_move': 1  # Default to White's turn if not specified
+                            }
+                    elif obs is None:
+                        # Create a placeholder observation when None is passed
+                        return {
+                            'board': np.zeros((13, 8, 8), dtype=np.float32),
+                            'action_mask': np.ones(self.env.action_space.n, dtype=np.int8),
+                            'white_to_move': 1  # Default to White's turn
+                        }
+                    else:
+                        # Create a placeholder observation with reasonable defaults
+                        print(f"WARNING: Unexpected observation format: {type(obs)}, creating placeholder.")
+                        return {
+                            'board': np.zeros((13, 8, 8), dtype=np.float32),
+                            'action_mask': np.ones(self.env.action_space.n, dtype=np.int8),
+                            'white_to_move': 1  # Default to White's turn
+                        }
             
             # Apply our custom wrapper
             env = DictObsWrapper(env)

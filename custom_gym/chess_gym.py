@@ -245,7 +245,8 @@ class ChessEnv(gym.Env):
         
         self.observation_space = spaces.Dict({
             'board': spaces.Box(low=0, high=1, shape=board_shape, dtype=np.float32),
-            'action_mask': spaces.Box(low=0, high=1, shape=action_mask_shape, dtype=np.float32)
+            'action_mask': spaces.Box(low=0, high=1, shape=action_mask_shape, dtype=np.float32),
+            'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
         })
         
         self.done = False
@@ -423,52 +424,72 @@ class ChessEnv(gym.Env):
         return self.state.action_to_move(action)
 
 class ActionMaskWrapper(gym.Wrapper):
-    """
-    A wrapper that adds an action mask to the observation,
-    which can be used by the agent to mask out illegal moves.
-    """
+    """Wrapper to add action mask to observation"""
+    
     def __init__(self, env):
-        super(ActionMaskWrapper, self).__init__(env)
-        
-        # Update observation space to include action mask
+        super().__init__(env)
+        # Define observation space with action mask added
         self.observation_space = spaces.Dict({
             'board': env.observation_space['board'],
             'action_mask': spaces.Box(
-                low=0, high=1, 
+                low=0, 
+                high=1, 
                 shape=(env.action_space.n,), 
                 dtype=np.float32
-            )
+            ),
+            'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
         })
-    
+        
     def reset(self, **kwargs):
-        """Reset the environment and add action mask to observation."""
-        # Handle both old and new Gym APIs
-        reset_result = self.env.reset(**kwargs)
+        """Reset environment and add action mask to observation"""
+        obs, info = self.env.reset(**kwargs)
+        action_mask = self._get_action_mask()
         
-        if isinstance(reset_result, tuple) and len(reset_result) >= 1:
-            # New API: (obs, info)
-            obs, info = reset_result
-            return obs, info
-        else:
-            # Old API: just obs
-            return reset_result
-    
+        # Ensure white_to_move is present in all observations
+        if 'white_to_move' not in obs:
+            # Add white_to_move based on board state
+            white_to_move = not self.env.board.turn  # chess.BLACK is True, chess.WHITE is False
+            obs['white_to_move'] = white_to_move
+        
+        # Create new observation with action mask
+        dict_obs = {
+            'board': obs['board'],
+            'action_mask': action_mask,
+            'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
+        }
+        
+        return dict_obs, info
+        
     def step(self, action):
-        """Take a step and add action mask to the new observation."""
-        # Handle both old and new Gym APIs
-        step_result = self.env.step(action)
+        """Take a step and add action mask to new observation"""
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        action_mask = self._get_action_mask()
         
-        if isinstance(step_result, tuple):
-            if len(step_result) == 4:  # obs, reward, done, info (old Gym API)
-                obs, reward, done, info = step_result
-                # Convert to new Gymnasium API: obs, reward, terminated, truncated, info
-                return obs, reward, done, False, info
-            elif len(step_result) == 5:  # obs, reward, terminated, truncated, info (newest Gymnasium API)
-                return step_result  # Already in the right format
+        # Ensure white_to_move is present in all observations
+        if 'white_to_move' not in obs:
+            # Add white_to_move based on board state
+            white_to_move = not self.env.board.turn  # chess.BLACK is True, chess.WHITE is False
+            obs['white_to_move'] = white_to_move
         
-        # Unexpected format - return a safe default with the correct Gymnasium format
-        print(f"WARNING: Unexpected step result format: {type(step_result)}")
-        return {}, 0.0, True, False, {}
+        # Create new observation with action mask
+        dict_obs = {
+            'board': obs['board'],
+            'action_mask': action_mask,
+            'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
+        }
+        
+        return dict_obs, reward, terminated, truncated, info
+    
+    def _get_action_mask(self):
+        """Create a mask of legal actions."""
+        legal_actions = self.env.legal_actions()
+        mask = np.zeros(self.action_space.n, dtype=np.float32)
+        
+        if legal_actions:
+            # Set 1 for each legal action
+            mask[legal_actions] = 1.0
+            
+        return mask
 
 def make_env(rank, seed=0, simple_test=False, white_advantage=None):
     """
