@@ -452,8 +452,7 @@ def train(args):
             "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
             
             # Optimize CPU usage
-            "num_envs_per_worker": 2,        # Each worker runs multiple environments in parallel
-            "num_env_runners_per_worker": 1, # Keep one runner per worker for stability
+            "num_envs_per_env_runner": 2,        # Each worker runs multiple environments in parallel
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
