@@ -50,7 +50,17 @@ class ChessMetricsCallback(DefaultCallbacks):
     
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         # Get the final outcome (from White's perspective)
-        outcome = episode.last_info_for(env_index).get("outcome", "unknown")
+        last_info = episode.last_info_for(env_index)
+        
+        # Handle the case where last_info is None (which can happen with some environment errors)
+        if last_info is None:
+            print(f"Warning: last_info is None for episode {episode.episode_id}, env_index {env_index}")
+            # Set default outcome
+            outcome = "unknown"
+        else:
+            # Extract outcome from info, defaulting to "unknown" if not present
+            outcome = last_info.get("outcome", "unknown")
+        
         episode_id = episode.episode_id
         
         # Record game outcome
@@ -66,6 +76,11 @@ class ChessMetricsCallback(DefaultCallbacks):
             self.win_rates["white"].append(0)
             self.win_rates["black"].append(0)
             self.win_rates["draw"].append(1)
+        else:
+            # Handle unknown outcomes gracefully
+            self.win_rates["white"].append(0)
+            self.win_rates["black"].append(0)
+            self.win_rates["draw"].append(0)
             
         # Clean up tracking
         if episode_id in self.is_white_to_move:
@@ -337,107 +352,113 @@ def create_rllib_chess_env(config):
         from gymnasium import spaces
         import numpy as np
         
-        # Check if observation space is already a Dict with expected structure
-        if not isinstance(env.observation_space, spaces.Dict) or 'board' not in env.observation_space.spaces or 'action_mask' not in env.observation_space.spaces:
-            # Print current observation space for debugging
-            print(f"WARNING: Expected Dict observation space but got {type(env.observation_space)}. Creating wrapper.")
-            
-            # Define a custom wrapper right here to ensure Dict observation space
-            class DictObsWrapper(gym.Wrapper):
-                def __init__(self, env):
-                    super().__init__(env)
-                    # Define the correct observation space as Dict
-                    self.observation_space = spaces.Dict({
-                        'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32),
-                        'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
-                    })
-                
-                def reset(self, **kwargs):
-                    result = self.env.reset(**kwargs)
-                    if isinstance(result, tuple):
-                        obs, info = result
-                        return self._wrap_observation(obs), info
-                    else:
-                        return self._wrap_observation(result)
-                
-                def step(self, action):
-                    result = self.env.step(action)
-                    if len(result) == 4:  # obs, reward, done, info (old style)
-                        obs, reward, done, info = result
-                        # Convert to new Gymnasium API (obs, reward, terminated, truncated, info)
-                        return self._wrap_observation(obs), reward, done, False, info
-                    elif len(result) == 5:  # obs, reward, terminated, truncated, info (new style)
-                        obs, reward, terminated, truncated, info = result
-                        return self._wrap_observation(obs), reward, terminated, truncated, info
-                    else:
-                        # Handle unexpected result format
-                        print(f"WARNING: Unexpected step result format with {len(result)} elements")
-                        # Return a safe default with the correct format
-                        return self._wrap_observation(None), 0.0, True, False, {}
-                
-                def _wrap_observation(self, obs):
-                    # Convert observation to Dict format if it's not already
-                    if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
-                        # Check board shape and fix if needed
-                        if obs['board'].shape != (13, 8, 8):
-                            print(f"Warning: Fixing board shape from {obs['board'].shape} to (13, 8, 8)")
-                            # Create a proper shape board with zeros
-                            proper_board = np.zeros((13, 8, 8), dtype=np.float32)
-                            
-                            # If it's a (8, 8) board, try to convert it to channel format
-                            if len(obs['board'].shape) == 2 and obs['board'].shape == (8, 8):
-                                # Set channel values based on piece values
-                                board_2d = obs['board']
-                                for i in range(8):
-                                    for j in range(8):
-                                        piece_val = board_2d[i, j]
-                                        if piece_val > 0:  # White pieces (1-6)
-                                            proper_board[int(piece_val)-1, i, j] = 1.0
-                                        elif piece_val < 0:  # Black pieces (-1 to -6)
-                                            proper_board[int(abs(piece_val))+5, i, j] = 1.0
-                                        else:  # Empty squares
-                                            proper_board[12, i, j] = 1.0
-                            
-                            obs['board'] = proper_board
-                        
-                        # If observation already has white_to_move field, use it
-                        if 'white_to_move' in obs:
-                            return {
-                                'board': obs['board'],
-                                'action_mask': obs['action_mask'],
-                                'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
-                            }
-                        else:
-                            # Add a default white_to_move (assuming White's turn)
-                            return {
-                                'board': obs['board'],
-                                'action_mask': obs['action_mask'],
-                                'white_to_move': 1  # Default to White's turn if not specified
-                            }
-                    elif obs is None:
-                        # Create a placeholder observation when None is passed
-                        return {
-                            'board': np.zeros((13, 8, 8), dtype=np.float32),
-                            'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
-                            'white_to_move': 1  # Default to White's turn
-                        }
-                    else:
-                        # Create a placeholder observation with reasonable defaults
-                        print(f"WARNING: Unexpected observation format: {type(obs)}, creating placeholder.")
-                        return {
-                            'board': np.zeros((13, 8, 8), dtype=np.float32),
-                            'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
-                            'white_to_move': 1  # Default to White's turn
-                        }
-            
-            # Apply our custom wrapper
-            env = DictObsWrapper(env)
+        # ALWAYS use the Dict wrapper regardless of current observation space
+        # Print current observation space for debugging
+        print(f"Wrapping environment with DictObsWrapper, original obs space: {type(env.observation_space)}")
         
-        # Verify the wrapper is applied correctly
-        if not isinstance(env.observation_space, spaces.Dict):
-            print(f"ERROR: After wrapping, observation space is still not Dict: {type(env.observation_space)}")
+        # Define a custom wrapper right here to ensure Dict observation space
+        class DictObsWrapper(gym.Wrapper):
+            def __init__(self, env):
+                super().__init__(env)
+                # Define the correct observation space as Dict
+                self.observation_space = spaces.Dict({
+                    'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
+                    'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32),
+                    'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
+                })
             
+            def reset(self, **kwargs):
+                result = self.env.reset(**kwargs)
+                if isinstance(result, tuple):
+                    obs, info = result
+                    return self._wrap_observation(obs), info
+                else:
+                    return self._wrap_observation(result)
+            
+            def step(self, action):
+                result = self.env.step(action)
+                if len(result) == 4:  # obs, reward, done, info (old style)
+                    obs, reward, done, info = result
+                    # Convert to new Gymnasium API (obs, reward, terminated, truncated, info)
+                    return self._wrap_observation(obs), reward, done, False, self._ensure_info(info)
+                elif len(result) == 5:  # obs, reward, terminated, truncated, info (new style)
+                    obs, reward, terminated, truncated, info = result
+                    return self._wrap_observation(obs), reward, terminated, truncated, self._ensure_info(info)
+                else:
+                    # Handle unexpected result format
+                    print(f"WARNING: Unexpected step result format with {len(result)} elements")
+                    # Return a safe default with the correct format
+                    return self._wrap_observation(None), 0.0, True, False, {"outcome": "unknown"}
+            
+            def _wrap_observation(self, obs):
+                # Check board shape and fix if needed
+                if isinstance(obs, dict) and 'board' in obs and (not isinstance(obs['board'], np.ndarray) or obs['board'].shape != (13, 8, 8)):
+                    print(f"Warning: Fixing board shape from {getattr(obs['board'], 'shape', 'unknown')} to (13, 8, 8)")
+                    # Create a proper shape board with zeros
+                    proper_board = np.zeros((13, 8, 8), dtype=np.float32)
+                    
+                    # If it's a 2D board, try to convert it to channel format
+                    if isinstance(obs['board'], np.ndarray) and len(obs['board'].shape) == 2 and obs['board'].shape == (8, 8):
+                        # Set channel values based on piece values
+                        board_2d = obs['board']
+                        for i in range(8):
+                            for j in range(8):
+                                piece_val = board_2d[i, j]
+                                if piece_val > 0:  # White pieces (1-6)
+                                    proper_board[int(piece_val)-1, i, j] = 1.0
+                                elif piece_val < 0:  # Black pieces (-1 to -6)
+                                    proper_board[int(abs(piece_val))+5, i, j] = 1.0
+                                else:  # Empty squares
+                                    proper_board[12, i, j] = 1.0
+                        obs['board'] = proper_board
+                    else:
+                        # Default handling for other cases
+                        proper_board[12, :, :] = 1.0  # Set empty squares
+                        obs['board'] = proper_board
+                                
+                # Convert observation to Dict format if it's not already
+                if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
+                    # If observation already has white_to_move field, use it
+                    if 'white_to_move' in obs:
+                        return {
+                            'board': obs['board'],
+                            'action_mask': obs['action_mask'],
+                            'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
+                        }
+                    else:
+                        # Add a default white_to_move (assuming White's turn)
+                        return {
+                            'board': obs['board'],
+                            'action_mask': obs['action_mask'],
+                            'white_to_move': 1  # Default to White's turn if not specified
+                        }
+                elif obs is None:
+                    # Create a placeholder observation when None is passed
+                    return {
+                        'board': np.zeros((13, 8, 8), dtype=np.float32),
+                        'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
+                        'white_to_move': 1  # Default to White's turn
+                    }
+                else:
+                    # Create a placeholder observation with reasonable defaults
+                    print(f"WARNING: Unexpected observation format: {type(obs)}, creating placeholder.")
+                    return {
+                        'board': np.zeros((13, 8, 8), dtype=np.float32),
+                        'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
+                        'white_to_move': 1  # Default to White's turn
+                    }
+                    
+            def _ensure_info(self, info):
+                """Ensure the info dictionary has the required fields"""
+                if info is None:
+                    info = {}
+                if "outcome" not in info:
+                    info["outcome"] = "unknown"
+                return info
+                    
+        # Always apply the wrapper to ensure consistent observation format
+        env = DictObsWrapper(env)
+        
         return env
         
     except Exception as e:
