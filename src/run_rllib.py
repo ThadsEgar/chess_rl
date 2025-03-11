@@ -448,7 +448,7 @@ def train(args):
             "soft_horizon": False,  # Don't reset environments mid-game
             
             # Rollout settings to encourage game completion
-            "rollout_fragment_length": 500,  # Increased from 200 for more complete games per rollout
+            "rollout_fragment_length": "auto",  # Increased from 200 for more complete games per rollout
             "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
             
             # Optimize CPU usage
