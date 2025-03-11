@@ -46,6 +46,7 @@ class ChessMetricsCallback(DefaultCallbacks):
         
         # Get info dict from the episode
         info = episode.last_info_for()
+        print(f"\nDEBUG: Episode end info: {info}")
         
         # Set all metrics to 0 by default
         episode.custom_metrics["white_win"] = 0.0
@@ -67,16 +68,20 @@ class ChessMetricsCallback(DefaultCallbacks):
         if "game_outcome" in info:
             episode.custom_metrics["game_completed"] = 1.0
             game_outcome = info["game_outcome"]
+            print(f"DEBUG: Game outcome: {game_outcome}")
             
             if game_outcome == "white_win":
                 self.episode_white_wins = 1
                 episode.custom_metrics["white_win"] = 1.0
+                print("DEBUG: Recorded white win")
             elif game_outcome == "black_win":
                 self.episode_black_wins = 1
                 episode.custom_metrics["black_win"] = 1.0
+                print("DEBUG: Recorded black win")
             elif game_outcome == "draw":
                 self.episode_draws = 1
                 episode.custom_metrics["draw"] = 1.0
+                print("DEBUG: Recorded draw")
             
             # Add move count as a numeric metric
             if "move_count" in info:
@@ -85,6 +90,7 @@ class ChessMetricsCallback(DefaultCallbacks):
             # Code different termination reasons as numeric values
             if "termination_reason" in info:
                 reason = info["termination_reason"]
+                print(f"DEBUG: Termination reason: {reason}")
                 # Map termination reasons to numeric codes (1-6)
                 if reason == "white_checkmate":
                     episode.custom_metrics["term_white_checkmate"] = 1.0
@@ -100,16 +106,55 @@ class ChessMetricsCallback(DefaultCallbacks):
                     episode.custom_metrics["term_repetition"] = 1.0
                 elif reason == "move_limit_exceeded":
                     episode.custom_metrics["term_move_limit"] = 1.0
+        
+        print("DEBUG: Final episode metrics:", episode.custom_metrics)
     
     def on_train_result(self, *, algorithm, result, **kwargs):
         """Called after each training iteration, to log chess statistics"""
-        custom_metrics = result.get("custom_metrics", {})
+        # Debug print all important result keys
+        print("\nDEBUG: Result keys:", list(result.keys()))
+        
+        # Helper to recursively print nested metrics 
+        def find_metrics_recursively(data, prefix=""):
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k in ["white_win_mean", "black_win_mean", "draw_mean", "game_completed_mean"]:
+                        print(f"FOUND METRIC: {prefix}.{k} = {v}")
+                    if isinstance(v, (dict, list)):
+                        find_metrics_recursively(v, prefix=f"{prefix}.{k}" if prefix else k)
+        
+        # Search for our metrics anywhere in the result structure
+        print("\nSEARCHING FOR METRICS IN RESULT STRUCTURE:")
+        find_metrics_recursively(result)
+        
+        # Check for metrics in different possible locations (RLlib structure changed in versions)
+        custom_metrics = {}
+        episodes_this_iter = result.get("episodes_this_iter", 0)
+        
+        # Try the env_runners structure (newer RLlib versions)
+        if "env_runners" in result:
+            print("DEBUG: Found env_runners structure")
+            env_runners = result["env_runners"]
+            if "custom_metrics" in env_runners:
+                custom_metrics = env_runners["custom_metrics"]
+                print("DEBUG: Found custom_metrics in env_runners:", custom_metrics)
+            episodes_this_iter = env_runners.get("episodes_this_iter", episodes_this_iter)
+        
+        # If nothing found, check the top-level custom_metrics
+        if not custom_metrics and "custom_metrics" in result:
+            print("DEBUG: Using top-level custom_metrics")
+            custom_metrics = result["custom_metrics"]
+        
+        print(f"DEBUG: Episodes this iter: {episodes_this_iter}")
+        print(f"DEBUG: Final custom_metrics being used: {custom_metrics}")
         
         # Extract metrics for the current iteration
-        white_wins = custom_metrics.get("white_win_mean", 0) * result.get("episodes_this_iter", 0)
-        black_wins = custom_metrics.get("black_win_mean", 0) * result.get("episodes_this_iter", 0)
-        draws = custom_metrics.get("draw_mean", 0) * result.get("episodes_this_iter", 0)
-        completed = custom_metrics.get("game_completed_mean", 0) * result.get("episodes_this_iter", 0)
+        white_wins = custom_metrics.get("white_win_mean", 0) * episodes_this_iter
+        black_wins = custom_metrics.get("black_win_mean", 0) * episodes_this_iter
+        draws = custom_metrics.get("draw_mean", 0) * episodes_this_iter
+        completed = custom_metrics.get("game_completed_mean", 0) * episodes_this_iter
+        
+        print(f"DEBUG: Calculated metrics - white_wins: {white_wins}, black_wins: {black_wins}, draws: {draws}, completed: {completed}")
         
         # Add to total wins
         if not hasattr(algorithm, "total_white_wins"):
@@ -123,7 +168,7 @@ class ChessMetricsCallback(DefaultCallbacks):
         algorithm.total_black_wins += int(black_wins)
         algorithm.total_draws += int(draws)
         algorithm.total_completed_games += int(completed)
-        algorithm.total_episodes += result.get("episodes_this_iter", 0)
+        algorithm.total_episodes += episodes_this_iter
         
         # Print a summary
         print("\n----- Chess Stats -----")
