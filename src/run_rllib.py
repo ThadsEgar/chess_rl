@@ -480,7 +480,7 @@ def train(args):
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
-            "compress_observations": True,  # Use compression to reduce memory usage
+            "compress_observations": False,  # Disable compression for faster processing
         },
     )
     
