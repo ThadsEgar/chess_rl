@@ -491,8 +491,8 @@ def train(args):
         verbose=1,
         metric="episode_reward_mean", 
         mode="max",
-        resume=True,  # Allow resuming from checkpoints
-        restore=latest_checkpoint,  # Restore from the latest checkpoint if available
+        resume="AUTO",  # Use AUTO mode to handle both cases: resume if exists, new if not
+        restore=latest_checkpoint if latest_checkpoint else None,  # Only restore if checkpoint exists
         config={
             "env": "chess_env",
             "disable_env_checking": True,
@@ -525,17 +525,20 @@ def train(args):
             # Make exploration settings consistent
             "explore": True,
             "exploration_config": {"type": "StochasticSampling"},
-            "_enable_rl_module_api": False,  # Must be False to use exploration_config
+            
+            # Completely bypass validation and API settings
+            "_enable_new_api_stack": False,
+            "_experimental_enable_new_api_stack": False,
+            "_disable_execution_plan_api": True,
+            "_skip_validate_config": True,
+            
+            # These MUST be False to use exploration_config
+            "_enable_rl_module_api": False,  
             "_enable_learner_api": False,
             "enable_rl_module_and_learner": False,
             
             # Register our custom callbacks
             "callbacks": ChessMetricsCallback,
-            # Completely bypass validation
-            "_enable_new_api_stack": False,
-            "_experimental_enable_new_api_stack": False,
-            "_disable_execution_plan_api": True,
-            "_skip_validate_config": True,
             "create_env_on_driver": True,
             "normalize_actions": False,
             "log_level": "WARN",  # Reduced logging to improve performance
