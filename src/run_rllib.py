@@ -456,9 +456,11 @@ def train(args):
             "env": "chess_env",
             "disable_env_checking": True,
             "framework": "torch",
-            "num_workers": args.num_workers,  # Keep original worker count
-            "num_cpus_per_worker": 1,
-            "num_gpus": 4 if args.device == "cuda" and not args.force_cpu else 0,
+            "num_workers": 4,  # 4 workers, one per GPU
+            "num_envs_per_worker": 30,  # 30 envs per worker, 120 total environments
+            "num_cpus_per_worker": 30,  # 30 CPUs per worker to handle 30 envs
+            "num_gpus": 1,  # 1 GPU for the trainer process (for model updates)
+            "num_gpus_per_worker": 0.75,  # Allocate most of each GPU to workers for inference
             "model": {
                 "custom_model": "chess_masked_model",
                 # Add some extra model config parameters to help with initialization
@@ -470,9 +472,9 @@ def train(args):
             "gamma": 0.99,
             "lambda": 0.95,
             "kl_coeff": 0.2,
-            "train_batch_size": 65536,   # Increased while keeping memory optimizations
-            "sgd_minibatch_size": 4096,  # Larger but still manageable
-            "num_sgd_iter": 5,           # Fewer SGD iterations for speed
+            "train_batch_size": 65536,  # Large batch for effective learning
+            "sgd_minibatch_size": 4096,  # Process reasonable chunks on GPU
+            "num_sgd_iter": 5,
             "lr": 3e-4,
             "clip_param": 0.2,
             "vf_clip_param": 10.0,
@@ -495,7 +497,7 @@ def train(args):
             "normalize_actions": False,
             "log_level": "WARN",  # Reduced logging to improve performance
             # Memory management settings to stabilize usage
-            "remote_worker_envs": False,  # Can't be True when num_envs_per_env_runner is 1
+            "remote_worker_envs": False,  # Keep environments in the same process as the worker
             "ignore_worker_failures": True,  # Continue if some workers fail
             "recreate_failed_workers": True,  # Automatically recreate workers that die
             "max_num_worker_restarts": 100,   # Allow many worker restarts
@@ -511,8 +513,8 @@ def train(args):
             "soft_horizon": False,  # Don't reset environments mid-game
             
             # Rollout settings for faster iteration
-            "rollout_fragment_length": "auto",  # Shorter fragments to reduce per-worker memory
-            "batch_mode": "truncate_episodes",  # Allow episode truncation for speed
+            "rollout_fragment_length": 200,  # Collect decent batch size before sending
+            "batch_mode": "truncate_episodes",
             
             # Single-system optimization
             "num_envs_per_env_runner": 1,  # Reduce to lower memory usage
@@ -520,7 +522,14 @@ def train(args):
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
-            "compress_observations": True,  # Enable observation compression
+            "compress_observations": True,
+            
+            # GPU and inference management - use proper RLlib parameters
+            "local_worker_inference": False,  # Don't run inference on rollout workers
+            "local_gpu_idx": 0,  # Use GPU 0 for the local worker
+            "_fake_gpus": False,  # Don't use fake GPUs
+            # Synchronize policy to workers regularly
+            "synchronize_filters": True,
         },
     )
     
