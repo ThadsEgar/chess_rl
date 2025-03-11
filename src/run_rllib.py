@@ -441,7 +441,7 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=1,
-        metric="env_runners/episode_reward_mean", 
+        metric="episode_reward_mean", 
         mode="max",
         config={
             "env": "chess_env",
