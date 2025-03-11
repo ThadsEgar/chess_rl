@@ -433,8 +433,13 @@ def train(args):
     
     # Get total available CPU cores
     import multiprocessing
-    total_cpus = multiprocessing.cpu_count()
+    total_cpus = 122  # Hardcode the available CPUs based on error message
     print(f"Total available CPU cores: {total_cpus}")
+    
+    # Reserve CPUs for the driver process
+    driver_cpus = 2
+    worker_cpus = total_cpus - driver_cpus
+    print(f"Reserving {driver_cpus} CPUs for driver, {worker_cpus} available for workers")
     
     # Register the custom model and environment
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
@@ -468,7 +473,7 @@ def train(args):
                 
     # Override the fixed worker count with command line args if using GPU-accelerated inference
     num_workers = 4  # Default to 4 workers for GPU inference
-    num_envs = 29    # Default to 30 envs per worker
+    num_envs = 30    # Default to 30 envs per worker
     
     # Determine CPUs per worker based on total and worker count
     if args.inference_mode == "cpu" and args.num_workers:
@@ -477,9 +482,17 @@ def train(args):
         cpus_per_worker = 1  # CPU inference needs only 1 CPU per worker
     else:
         print(f"Using GPU-accelerated inference with {num_workers} workers, each running {num_envs} environments")
-        # Calculate CPUs per worker based on total available and leaving some for the driver
-        cpus_per_worker = max(1, int((total_cpus - 2) / num_workers))
-        print(f"Allocating {cpus_per_worker} CPU cores per worker")
+        # Calculate CPUs per worker based on total available
+        cpus_per_worker = max(1, int(worker_cpus / num_workers))
+        print(f"Allocating {cpus_per_worker} CPUs per worker for a total of {cpus_per_worker * num_workers} CPUs")
+        
+        # Verify we're not exceeding available resources
+        total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
+        if total_cpu_request > total_cpus:
+            print(f"WARNING: Total CPU request ({total_cpu_request}) exceeds available CPUs ({total_cpus})")
+            # Adjust CPUs per worker if needed
+            cpus_per_worker = max(1, int(worker_cpus / num_workers))
+            print(f"Adjusted to {cpus_per_worker} CPUs per worker")
     
     # Configure RLlib using Ray Tune directly to bypass API version issues
     analysis = tune.run(
@@ -497,6 +510,7 @@ def train(args):
             "env": "chess_env",
             "disable_env_checking": True,
             "framework": "torch",
+            "num_cpus_for_driver": driver_cpus,  # Allocate CPUs for driver process
             "num_workers": num_workers,
             "num_envs_per_worker": num_envs,
             "num_cpus_per_worker": cpus_per_worker,  # Allocate CPUs per worker
