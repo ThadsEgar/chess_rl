@@ -431,16 +431,55 @@ def train(args):
             include_dashboard=args.dashboard
         )
     
-    # Register the custom model
-    ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
+    # Get total available CPU cores
+    import multiprocessing
+    total_cpus = multiprocessing.cpu_count()
+    print(f"Total available CPU cores: {total_cpus}")
     
-    # Register the environment
+    # Register the custom model and environment
+    ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
     tune.register_env("chess_env", create_rllib_chess_env)
     
     # Create an absolute path for checkpoint directory
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Using checkpoint directory: {checkpoint_dir}")
+    
+    # Check for existing checkpoints
+    latest_checkpoint = None
+    if not args.fresh_start:
+        # Find the latest checkpoint directory
+        checkpoint_dirs = [d for d in os.listdir(checkpoint_dir) 
+                          if os.path.isdir(os.path.join(checkpoint_dir, d)) and d.startswith("PPO_chess_env_")]
+        
+        if checkpoint_dirs:
+            # Sort by creation time, newest first
+            checkpoint_dirs.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)), reverse=True)
+            latest_trial_dir = os.path.join(checkpoint_dir, checkpoint_dirs[0])
+            
+            # Find the latest checkpoint file within this directory
+            checkpoint_files = [f for f in os.listdir(latest_trial_dir) 
+                               if os.path.isdir(os.path.join(latest_trial_dir, f)) and f.startswith("checkpoint_")]
+            
+            if checkpoint_files:
+                checkpoint_files.sort(key=lambda x: int(x.split("_")[1]) if x.split("_")[1].isdigit() else 0, reverse=True)
+                latest_checkpoint = os.path.join(latest_trial_dir, checkpoint_files[0])
+                print(f"Resuming training from checkpoint: {latest_checkpoint}")
+                
+    # Override the fixed worker count with command line args if using GPU-accelerated inference
+    num_workers = 4  # Default to 4 workers for GPU inference
+    num_envs = 30    # Default to 30 envs per worker
+    
+    # Determine CPUs per worker based on total and worker count
+    if args.inference_mode == "cpu" and args.num_workers:
+        num_workers = args.num_workers
+        num_envs = 1
+        cpus_per_worker = 1  # CPU inference needs only 1 CPU per worker
+    else:
+        print(f"Using GPU-accelerated inference with {num_workers} workers, each running {num_envs} environments")
+        # Calculate CPUs per worker based on total available and leaving some for the driver
+        cpus_per_worker = max(1, int((total_cpus - 2) / num_workers))
+        print(f"Allocating {cpus_per_worker} CPU cores per worker")
     
     # Configure RLlib using Ray Tune directly to bypass API version issues
     analysis = tune.run(
@@ -452,13 +491,15 @@ def train(args):
         verbose=1,
         metric="episode_reward_mean", 
         mode="max",
+        resume=True,  # Allow resuming from checkpoints
+        restore=latest_checkpoint,  # Restore from the latest checkpoint if available
         config={
             "env": "chess_env",
             "disable_env_checking": True,
             "framework": "torch",
-            "num_workers": 4,  # 4 workers, one per GPU
-            "num_envs_per_worker": 30,  # 30 envs per worker, 120 total environments
-            "num_cpus_per_worker": 30,  # 30 CPUs per worker to handle 30 envs
+            "num_workers": num_workers,
+            "num_envs_per_worker": num_envs,
+            "num_cpus_per_worker": cpus_per_worker,  # Allocate CPUs per worker
             "num_gpus": 1,  # 1 GPU for the trainer process (for model updates)
             "num_gpus_per_worker": 0.75,  # Allocate most of each GPU to workers for inference
             "model": {
@@ -480,8 +521,14 @@ def train(args):
             "vf_clip_param": 10.0,
             "entropy_coeff": 0.01,
             "vf_loss_coeff": 0.5,
+            
+            # Make exploration settings consistent
             "explore": True,
             "exploration_config": {"type": "StochasticSampling"},
+            "_enable_rl_module_api": False,  # Must be False to use exploration_config
+            "_enable_learner_api": False,
+            "enable_rl_module_and_learner": False,
+            
             # Register our custom callbacks
             "callbacks": ChessMetricsCallback,
             # Completely bypass validation
@@ -489,10 +536,6 @@ def train(args):
             "_experimental_enable_new_api_stack": False,
             "_disable_execution_plan_api": True,
             "_skip_validate_config": True,
-            "enable_rl_module_and_learner": False,
-            "_enable_rl_module_api": False,
-            "_enable_learner_api": False,
-            # Add extra options to help with initialization
             "create_env_on_driver": True,
             "normalize_actions": False,
             "log_level": "WARN",  # Reduced logging to improve performance
@@ -576,6 +619,10 @@ def main():
                         help="How often to save checkpoints (iterations)")
     parser.add_argument("--render", action="store_true", 
                         help="Render environment during evaluation")
+    parser.add_argument("--fresh_start", action="store_true", 
+                        help="Start training from scratch")
+    parser.add_argument("--inference_mode", choices=["cpu", "gpu"], default="gpu", 
+                        help="Inference mode: cpu or gpu")
     
     args = parser.parse_args()
     
