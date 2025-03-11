@@ -447,7 +447,8 @@ def train(args):
             "env": "chess_env",
             "disable_env_checking": True,
             "framework": "torch",
-            "num_workers": args.num_workers,
+            "num_workers": args.num_workers,  # Keep original worker count
+            "num_cpus_per_worker": 1,
             "num_gpus": 4 if args.device == "cuda" and not args.force_cpu else 0,
             "model": {
                 "custom_model": "chess_masked_model",
@@ -468,7 +469,8 @@ def train(args):
             "vf_clip_param": 10.0,
             "entropy_coeff": 0.01,
             "vf_loss_coeff": 0.5,
-            "exploration_config": {},
+            "explore": True,
+            "exploration_config": {"type": "StochasticSampling"},
             # Register our custom callbacks
             "callbacks": ChessMetricsCallback,
             # Completely bypass validation
@@ -489,22 +491,23 @@ def train(args):
             "restart_failed_sub_environments": True,
             "buffer_options": {
                 "reuse_when_possible": True,  # Reuse tensors to reduce memory pressure
+                "inplace_update": True,  # Enable in-place updates for buffers
             },
             # Increase episode length limits to allow games to complete
             "horizon": 1000,  # Maximum steps per episode - chess games need time to finish
             "soft_horizon": False,  # Don't reset environments mid-game
             
             # Rollout settings for faster iteration
-            "rollout_fragment_length": "auto",  # Smaller fragments for more frequent updates
+            "rollout_fragment_length": 400,  # Shorter fragments to reduce per-worker memory
             "batch_mode": "truncate_episodes",  # Allow episode truncation for speed
             
             # Single-system optimization
-            "num_envs_per_env_runner": 2,  # Reduce to lower memory usage
+            "num_envs_per_env_runner": 1,  # Reduce to lower memory usage
             "num_env_runners_per_worker": 1,
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
-            "compress_observations": False,  # Disable compression for faster processing
+            "compress_observations": True,  # Enable observation compression
         },
     )
     
