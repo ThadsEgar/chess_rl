@@ -93,8 +93,12 @@ WORKER_COUNT=$(($CPU_COUNT - 3))
 echo "Recommended worker count: $WORKER_COUNT"
 
 # Set batch size based on GPU count
-if [ $GPU_COUNT -ge 2 ]; then
-    echo "Multi-GPU setup detected. Optimizing for $GPU_COUNT GPUs."
+if [ $GPU_COUNT -ge 4 ]; then
+    echo "Multi-GPU setup (4+ GPUs) detected. Optimizing for $GPU_COUNT GPUs."
+    echo "Recommended train_batch_size: 65536"
+    echo "Recommended sgd_minibatch_size: 4096"
+elif [ $GPU_COUNT -ge 2 ]; then
+    echo "Multi-GPU setup (2 GPUs) detected. Optimizing for $GPU_COUNT GPUs."
     echo "Recommended train_batch_size: 32768"
     echo "Recommended sgd_minibatch_size: 2048"
 else
@@ -113,13 +117,34 @@ echo 'export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,garbage_collectio
 
 # Create a tmux session for persistent training
 echo "Setting up tmux for persistent training sessions..."
-cat > start_training.sh << EOL
+
+# Generate settings based on GPU count
+if [ $GPU_COUNT -ge 4 ]; then
+    cat > start_training.sh << EOL
+#!/bin/bash
+source $HOME/miniconda/bin/activate
+conda activate chess_rl
+cd \$(dirname \$0)
+python src/run_rllib.py train --device cuda --num_workers 124 --dashboard
+EOL
+elif [ $GPU_COUNT -ge 2 ]; then
+    cat > start_training.sh << EOL
 #!/bin/bash
 source $HOME/miniconda/bin/activate
 conda activate chess_rl
 cd \$(dirname \$0)
 python src/run_rllib.py train --device cuda --num_workers $WORKER_COUNT --dashboard
 EOL
+else
+    cat > start_training.sh << EOL
+#!/bin/bash
+source $HOME/miniconda/bin/activate
+conda activate chess_rl
+cd \$(dirname \$0)
+python src/run_rllib.py train --device cuda --num_workers $WORKER_COUNT --dashboard
+EOL
+fi
+
 chmod +x start_training.sh
 
 # Print GPU information for verification

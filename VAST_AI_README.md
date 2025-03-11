@@ -74,6 +74,37 @@ Monitor your training using:
    ```
    Access TensorBoard at `http://YOUR_INSTANCE_IP:6006`
 
+## Multi-GPU Scaling
+
+Your setup with 4 GPUs and 128 CPU cores is powerful and can be optimized as follows:
+
+### 4-GPU Configuration
+For optimal performance with 4 GPUs:
+
+```python
+"num_gpus": 4,
+"train_batch_size": 65536,  # 16K samples per GPU
+"sgd_minibatch_size": 4096, # Larger minibatches for efficient processing
+"num_sgd_iter": 5,          # Keep iteration count moderate
+```
+
+### 128 CPU Core Allocation
+- Use 122-124 workers (`--num_workers 124`)
+- Reserve 4-6 cores for system and driver processes
+- With `num_envs_per_worker=2`, this provides 244-248 parallel environments
+
+### Memory Management
+- Ensure your script uses `PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,garbage_collection_threshold:0.8"`
+- Consider enabling GPU memory sharing with `"_memory_shared_prefix": "chess_rl_"` if running low on GPU memory
+
+### Batch Distribution Across 4 GPUs
+With a total batch size of 65,536:
+- Each GPU processes ~16,384 samples per iteration
+- Each GPU handles 4 minibatches of 4,096 samples each
+- All gradients are synchronized across GPUs automatically
+
+This configuration maximizes both your CPU cores for environment simulation and your GPUs for neural network training.
+
 ## Optimizing Performance
 
 For best performance:

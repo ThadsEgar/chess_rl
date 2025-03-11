@@ -441,7 +441,7 @@ def train(args):
             "env": "chess_env",
             "framework": "torch",
             "num_workers": args.num_workers,
-            "num_gpus": 1 if args.device == "cuda" and not args.force_cpu else 0,
+            "num_gpus": 4 if args.device == "cuda" and not args.force_cpu else 0,
             "model": {
                 "custom_model": "chess_masked_model",
                 # Add some extra model config parameters to help with initialization
@@ -453,8 +453,8 @@ def train(args):
             "gamma": 0.99,
             "lambda": 0.95,
             "kl_coeff": 0.2,
-            "train_batch_size": 16384,   # Increased while keeping memory optimizations
-            "sgd_minibatch_size": 1024,  # Larger but still manageable
+            "train_batch_size": 65536,   # Increased while keeping memory optimizations
+            "sgd_minibatch_size": 4096,  # Larger but still manageable
             "num_sgd_iter": 5,           # Fewer SGD iterations for speed
             "lr": 3e-4,
             "clip_param": 0.2,
