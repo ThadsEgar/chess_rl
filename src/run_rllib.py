@@ -25,6 +25,95 @@ from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 
 torch, nn = try_import_torch()
 
+# Define a custom callback to track chess game statistics
+class ChessMetricsCallback(DefaultCallbacks):
+    """Custom callbacks for tracking chess game statistics"""
+    
+    def __init__(self):
+        super().__init__()
+        # Track metrics across episodes
+        self.white_wins = 0
+        self.black_wins = 0
+        self.draws = 0
+        self.total_games = 0
+        self.total_episodes = 0
+        self.completed_episodes = 0
+    
+    def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        """Called when an episode ends, to track game outcomes"""
+        # Increment episode counter
+        self.total_episodes += 1
+        
+        # Get info dict from the episode
+        info = episode.last_info_for()
+        
+        # Only count completed games (where we have a game_outcome)
+        if "game_outcome" in info:
+            self.completed_episodes += 1
+            game_outcome = info["game_outcome"]
+            
+            # Initialize metrics
+            episode.custom_metrics["white_win"] = 0.0
+            episode.custom_metrics["black_win"] = 0.0
+            episode.custom_metrics["draw"] = 0.0
+            
+            # Increment appropriate counter based on outcome
+            if game_outcome == "white_win":
+                self.white_wins += 1
+                episode.custom_metrics["white_win"] = 1.0
+            elif game_outcome == "black_win":
+                self.black_wins += 1
+                episode.custom_metrics["black_win"] = 1.0
+            elif game_outcome == "draw":
+                self.draws += 1
+                episode.custom_metrics["draw"] = 1.0
+            
+            self.total_games += 1
+            
+        # Add episode metrics
+        episode.custom_metrics["episode_completed"] = 1.0 if "game_outcome" in info else 0.0
+        
+        # Calculate win/draw percentages
+        if self.total_games > 0:
+            white_win_pct = self.white_wins / self.total_games * 100
+            black_win_pct = self.black_wins / self.total_games * 100
+            draw_pct = self.draws / self.total_games * 100
+            
+            # Log overall statistics as custom metrics
+            episode.custom_metrics["white_win_pct"] = white_win_pct
+            episode.custom_metrics["black_win_pct"] = black_win_pct 
+            episode.custom_metrics["draw_pct"] = draw_pct
+            
+            # Also log raw counts
+            episode.custom_metrics["white_wins_count"] = self.white_wins
+            episode.custom_metrics["black_wins_count"] = self.black_wins
+            episode.custom_metrics["draws_count"] = self.draws
+            episode.custom_metrics["total_games"] = self.total_games
+            
+        # Track episode statistics
+        episode.custom_metrics["total_episodes"] = self.total_episodes
+        episode.custom_metrics["completed_episodes"] = self.completed_episodes
+    
+    def on_train_result(self, *, algorithm, result, **kwargs):
+        """Called after each training iteration, to log chess statistics"""
+        # Extract metrics and print a simple summary
+        metrics = result.get("env_runners", {})
+        
+        # Check if we have custom metrics
+        if "custom_metrics" in metrics:
+            custom_metrics = metrics["custom_metrics"]
+            
+            # Print a minimal summary
+            print("\n----- Chess Stats -----")
+            print(f"W/B/D: {self.white_wins}/{self.black_wins}/{self.draws}")
+            
+            # Calculate completion rate
+            if self.total_episodes > 0:
+                completion_rate = self.completed_episodes / self.total_episodes * 100
+                print(f"Completion: {completion_rate:.1f}%")
+            print("----------------------\n")
+
+
 class ChessMaskedModel(TorchModelV2, nn.Module):
     """Custom model for Chess that supports action masking"""
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
@@ -269,95 +358,6 @@ def train(args):
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Using checkpoint directory: {checkpoint_dir}")
-    
-    # Define a custom callback to track chess game outcomes
-    class ChessMetricsCallback(DefaultCallbacks):
-        """Custom callbacks for tracking chess game statistics"""
-        
-        def __init__(self):
-            super().__init__()
-            # Track metrics across episodes
-            self.white_wins = 0
-            self.black_wins = 0
-            self.draws = 0
-            self.total_games = 0
-            self.total_episodes = 0
-            self.completed_episodes = 0
-        
-        def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
-            """Called when an episode ends, to track game outcomes"""
-            # Increment episode counter
-            self.total_episodes += 1
-            
-            # Get info dict from the episode
-            info = episode.last_info_for()
-            
-            # Only count completed games (where we have a game_outcome)
-            if "game_outcome" in info:
-                self.completed_episodes += 1
-                game_outcome = info["game_outcome"]
-                
-                # Initialize metrics
-                episode.custom_metrics["white_win"] = 0.0
-                episode.custom_metrics["black_win"] = 0.0
-                episode.custom_metrics["draw"] = 0.0
-                
-                # Increment appropriate counter based on outcome
-                if game_outcome == "white_win":
-                    self.white_wins += 1
-                    episode.custom_metrics["white_win"] = 1.0
-                elif game_outcome == "black_win":
-                    self.black_wins += 1
-                    episode.custom_metrics["black_win"] = 1.0
-                elif game_outcome == "draw":
-                    self.draws += 1
-                    episode.custom_metrics["draw"] = 1.0
-                
-                self.total_games += 1
-            
-            # Add episode metrics
-            episode.custom_metrics["episode_completed"] = 1.0 if "game_outcome" in info else 0.0
-            
-            # Calculate win/draw percentages
-            if self.total_games > 0:
-                white_win_pct = self.white_wins / self.total_games * 100
-                black_win_pct = self.black_wins / self.total_games * 100
-                draw_pct = self.draws / self.total_games * 100
-                
-                # Log overall statistics as custom metrics
-                episode.custom_metrics["white_win_pct"] = white_win_pct
-                episode.custom_metrics["black_win_pct"] = black_win_pct 
-                episode.custom_metrics["draw_pct"] = draw_pct
-                
-                # Also log raw counts
-                episode.custom_metrics["white_wins_count"] = self.white_wins
-                episode.custom_metrics["black_wins_count"] = self.black_wins
-                episode.custom_metrics["draws_count"] = self.draws
-                episode.custom_metrics["total_games"] = self.total_games
-            
-            # Track episode statistics
-            episode.custom_metrics["total_episodes"] = self.total_episodes
-            episode.custom_metrics["completed_episodes"] = self.completed_episodes
-        
-        def on_train_result(self, *, algorithm, result, **kwargs):
-            """Called after each training iteration, to log chess statistics"""
-            # Extract metrics and print a simple summary
-            metrics = result.get("env_runners", {})
-            
-            # Check if we have custom metrics
-            if "custom_metrics" in metrics:
-                custom_metrics = metrics["custom_metrics"]
-                
-                # Print a minimal summary
-                print("\n----- Chess Stats -----")
-                print(f"W/B/D: {custom_metrics.get('white_wins_count', 0)}/{custom_metrics.get('black_wins_count', 0)}/{custom_metrics.get('draws_count', 0)}")
-                
-                # Calculate completion rate
-                total = custom_metrics.get('total_episodes', 0)
-                if total > 0:
-                    completion_rate = custom_metrics.get('completed_episodes', 0) / total * 100
-                    print(f"Completion: {completion_rate:.1f}%")
-                print("----------------------\n")
     
     # Configure RLlib using Ray Tune directly to bypass API version issues
     analysis = tune.run(
