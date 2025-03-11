@@ -465,7 +465,7 @@ def train(args):
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
         "num_cpus_per_worker": cpus_per_worker,
-        "num_gpus": 1,  # Driver uses 1 GPU
+        "num_gpus": 2,  # Driver uses 2 GPU
         "num_gpus_per_worker": 0.5,  # Workers share remaining GPUs
         "num_envs_per_worker": num_envs,
         "model": {
