@@ -436,10 +436,14 @@ def train(args):
     total_cpus = 122  # Hardcode the available CPUs based on error message
     print(f"Total available CPU cores: {total_cpus}")
     
-    # Reserve CPUs for the driver process
+    # Use a very conservative resource allocation to avoid conflicts
     driver_cpus = 2
-    worker_cpus = total_cpus - driver_cpus
-    print(f"Reserving {driver_cpus} CPUs for driver, {worker_cpus} available for workers")
+    num_workers = 4
+    cpus_per_worker = 20  # Much lower than before to avoid any resource conflicts
+    num_envs = 5  # Greatly reduced to ensure stability
+    
+    total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
+    print(f"Total CPU request: {total_cpu_request} of {total_cpus} available")
     
     # Register the custom model and environment
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
@@ -450,51 +454,7 @@ def train(args):
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Using checkpoint directory: {checkpoint_dir}")
     
-    # Check for existing checkpoints
-    latest_checkpoint = None
-    if not args.fresh_start:
-        # Find the latest checkpoint directory
-        checkpoint_dirs = [d for d in os.listdir(checkpoint_dir) 
-                          if os.path.isdir(os.path.join(checkpoint_dir, d)) and d.startswith("PPO_chess_env_")]
-        
-        if checkpoint_dirs:
-            # Sort by creation time, newest first
-            checkpoint_dirs.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)), reverse=True)
-            latest_trial_dir = os.path.join(checkpoint_dir, checkpoint_dirs[0])
-            
-            # Find the latest checkpoint file within this directory
-            checkpoint_files = [f for f in os.listdir(latest_trial_dir) 
-                               if os.path.isdir(os.path.join(latest_trial_dir, f)) and f.startswith("checkpoint_")]
-            
-            if checkpoint_files:
-                checkpoint_files.sort(key=lambda x: int(x.split("_")[1]) if x.split("_")[1].isdigit() else 0, reverse=True)
-                latest_checkpoint = os.path.join(latest_trial_dir, checkpoint_files[0])
-                print(f"Resuming training from checkpoint: {latest_checkpoint}")
-                
-    # Override the fixed worker count with command line args if using GPU-accelerated inference
-    num_workers = 4  # Default to 4 workers for GPU inference
-    num_envs = 30    # Default to 30 envs per worker
-    
-    # Determine CPUs per worker based on total and worker count
-    if args.inference_mode == "cpu" and args.num_workers:
-        num_workers = args.num_workers
-        num_envs = 1
-        cpus_per_worker = 1  # CPU inference needs only 1 CPU per worker
-    else:
-        print(f"Using GPU-accelerated inference with {num_workers} workers, each running {num_envs} environments")
-        # Calculate CPUs per worker based on total available
-        cpus_per_worker = max(1, int(worker_cpus / num_workers))
-        print(f"Allocating {cpus_per_worker} CPUs per worker for a total of {cpus_per_worker * num_workers} CPUs")
-        
-        # Verify we're not exceeding available resources
-        total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
-        if total_cpu_request > total_cpus:
-            print(f"WARNING: Total CPU request ({total_cpu_request}) exceeds available CPUs ({total_cpus})")
-            # Adjust CPUs per worker if needed
-            cpus_per_worker = max(1, int(worker_cpus / num_workers))
-            print(f"Adjusted to {cpus_per_worker} CPUs per worker")
-    
-    # Configure RLlib using Ray Tune directly to bypass API version issues
+    # Use a minimalist configuration to avoid conflicts
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
@@ -504,93 +464,39 @@ def train(args):
         verbose=1,
         metric="episode_reward_mean", 
         mode="max",
-        resume="AUTO",  # Use AUTO mode to handle both cases: resume if exists, new if not
-        restore=latest_checkpoint if latest_checkpoint else None,  # Only restore if checkpoint exists
+        resume=None,  # Explicitly start a new run
         config={
             "env": "chess_env",
-            "disable_env_checking": True,
             "framework": "torch",
-            "num_cpus_for_driver": driver_cpus,  # Allocate CPUs for driver process
+            "disable_env_checking": True,
+            
+            # Basic resource allocation
+            "num_cpus_for_driver": driver_cpus,
             "num_workers": num_workers,
+            "num_cpus_per_worker": cpus_per_worker,
+            "num_gpus": 1,
+            "num_gpus_per_worker": 0.75,
             "num_envs_per_worker": num_envs,
-            "num_cpus_per_worker": cpus_per_worker,  # Allocate CPUs per worker
-            "num_gpus": 1,  # 1 GPU for the trainer process (for model updates)
-            "num_gpus_per_worker": 0.75,  # Allocate most of each GPU to workers for inference
+            
+            # Model configuration
             "model": {
                 "custom_model": "chess_masked_model",
-                # Add some extra model config parameters to help with initialization
                 "custom_model_config": {
                     "handle_missing_action_mask": True,
                 }
             },
-            # PPO specific configs
-            "gamma": 0.99,
-            "lambda": 0.95,
-            "kl_coeff": 0.2,
-            "train_batch_size": 65536,  # Large batch for effective learning
-            "sgd_minibatch_size": 4096,  # Process reasonable chunks on GPU
-            "num_sgd_iter": 5,
+            
+            # PPO configuration - keep it minimal
+            "train_batch_size": 4000,  # Much smaller batch size
+            "sgd_minibatch_size": 128,  # Smaller minibatches
+            "num_sgd_iter": 4,
             "lr": 3e-4,
-            "clip_param": 0.2,
-            "vf_clip_param": 10.0,
-            "entropy_coeff": 0.01,
-            "vf_loss_coeff": 0.5,
             
-            # Make exploration settings consistent
-            "explore": True,
-            "exploration_config": {"type": "StochasticSampling"},
-            
-            # Completely bypass validation and API settings
-            "_enable_new_api_stack": False,
-            "_experimental_enable_new_api_stack": False,
-            "_disable_execution_plan_api": True,
-            "_skip_validate_config": True,
-            
-            # These MUST be False to use exploration_config
-            "_enable_rl_module_api": False,  
-            "_enable_learner_api": False,
-            "enable_rl_module_and_learner": False,
-            
-            # Register our custom callbacks
+            # Only essential settings - no API flags
             "callbacks": ChessMetricsCallback,
             "create_env_on_driver": True,
-            "normalize_actions": False,
-            "log_level": "WARN",  # Reduced logging to improve performance
-            # Memory management settings to stabilize usage
-            "remote_worker_envs": False,  # Keep environments in the same process as the worker
-            "ignore_worker_failures": True,  # Continue if some workers fail
-            "recreate_failed_workers": True,  # Automatically recreate workers that die
-            "max_num_worker_restarts": 100,   # Allow many worker restarts
-            "keep_per_episode_custom_metrics": False,  # Don't keep custom metrics for all episodes
-            "delay_between_worker_restarts_s": 5.0,  # Wait less time between restarts
-            "metrics_num_episodes_for_smoothing": 25,  # Use fewer episodes for metrics
-            "buffer_options": {
-                "reuse_when_possible": True,  # Reuse tensors to reduce memory pressure
-                "inplace_update": True,  # Enable in-place updates for buffers
-            },
-            # Increase episode length limits to allow games to complete
-            "horizon": 1000,  # Maximum steps per episode - chess games need time to finish
-            "soft_horizon": False,  # Don't reset environments mid-game
-            
-            # Rollout settings for faster iteration
-            "rollout_fragment_length": 200,  # Collect decent batch size before sending
-            "batch_mode": "truncate_episodes",
-            
-            # Single-system optimization
-            "num_envs_per_env_runner": 1,  # Reduce to lower memory usage
-            "num_env_runners_per_worker": 1,
-            
-            # Lower worker memory usage to avoid crashes
-            "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
             "compress_observations": True,
-            
-            # GPU and inference management - use proper RLlib parameters
-            "local_worker_inference": False,  # Don't run inference on rollout workers
-            "local_gpu_idx": 0,  # Use GPU 0 for the local worker
-            "_fake_gpus": False,  # Don't use fake GPUs
-            # Synchronize policy to workers regularly
-            "synchronize_filters": True,
-        },
+        }
     )
     
     # Get best checkpoint
