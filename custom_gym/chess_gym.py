@@ -62,12 +62,15 @@ def canonical_encode_board_for_cnn(state):
     """
     Encode the board from the perspective of the current player for CNN input.
     Uses a 13-channel representation (6 for player's pieces, 6 for opponent's, 1 for empty squares).
+    
+    Returns:
+        numpy.ndarray: A 13×8×8 representation of the board state
     """
-    board = state.board
+    board = state.board if hasattr(state, 'board') else state
     encoded = np.zeros((13, 8, 8), dtype=np.float32)
     
     # Current player is always white in our encoding
-    player_is_white = board.turn
+    player_is_white = board.turn if hasattr(board, 'turn') else True
     
     for i in range(8):
         for j in range(8):
@@ -80,10 +83,14 @@ def canonical_encode_board_for_cnn(state):
                 
                 if (player_is_white and is_white) or (not player_is_white and not is_white):
                     # Current player's pieces (always in channels 0-5)
-                    encoded[piece_type - 1, i, j] = 1
+                    channel = piece_type - 1  # Convert from 1-based to 0-based indexing
+                    if 0 <= channel < 6:  # Ensure valid index
+                        encoded[channel, i, j] = 1
                 else:
                     # Opponent's pieces (always in channels 6-11)
-                    encoded[piece_type + 5, i, j] = 1
+                    channel = piece_type + 5  # Offset by 6, then -1 for 0-based indexing
+                    if 6 <= channel < 12:  # Ensure valid index
+                        encoded[channel, i, j] = 1
             else:
                 # Empty square (channel 12)
                 encoded[12, i, j] = 1
@@ -91,6 +98,20 @@ def canonical_encode_board_for_cnn(state):
     # If current player is black, flip the board
     if not player_is_white:
         encoded = np.flip(encoded, axis=1)
+    
+    # Final safety check to ensure correct shape
+    if encoded.shape != (13, 8, 8):
+        print(f"Warning: canonical_encode_board_for_cnn produced incorrect shape: {encoded.shape}, fixing to (13, 8, 8)")
+        # Create a proper shape board with zeros
+        proper_board = np.zeros((13, 8, 8), dtype=np.float32)
+        # Set empty squares to 1
+        proper_board[12, :, :] = 1
+        # Try to copy data if possible
+        if len(encoded.shape) == 3 and encoded.shape[1:] == (8, 8):
+            # Copy the available channels
+            for c in range(min(encoded.shape[0], 13)):
+                proper_board[c] = encoded[c]
+        encoded = proper_board
     
     return encoded
 
@@ -383,13 +404,14 @@ class ChessEnv(gym.Env):
     
     def _get_obs(self):
         """Returns the current observation."""
-        board_state = encode_board(self.state)
+        # Use the canonical_encode_board_for_cnn function which produces (13, 8, 8) shape
+        board_state = canonical_encode_board_for_cnn(self.state)
         action_mask = self._get_action_mask()
         
         return {
             'board': board_state,
             'action_mask': action_mask,
-            'white_to_move': not self.board.turn  # chess.BLACK is True, chess.WHITE is False
+            'white_to_move': int(not self.board.turn)  # chess.BLACK is True, chess.WHITE is False
         }
     
     def _get_action_mask(self):

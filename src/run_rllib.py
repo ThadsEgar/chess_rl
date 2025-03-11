@@ -349,7 +349,7 @@ def create_rllib_chess_env(config):
                     # Define the correct observation space as Dict
                     self.observation_space = spaces.Dict({
                         'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.int8),
+                        'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32),
                         'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
                     })
                 
@@ -379,6 +379,28 @@ def create_rllib_chess_env(config):
                 def _wrap_observation(self, obs):
                     # Convert observation to Dict format if it's not already
                     if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
+                        # Check board shape and fix if needed
+                        if obs['board'].shape != (13, 8, 8):
+                            print(f"Warning: Fixing board shape from {obs['board'].shape} to (13, 8, 8)")
+                            # Create a proper shape board with zeros
+                            proper_board = np.zeros((13, 8, 8), dtype=np.float32)
+                            
+                            # If it's a (8, 8) board, try to convert it to channel format
+                            if len(obs['board'].shape) == 2 and obs['board'].shape == (8, 8):
+                                # Set channel values based on piece values
+                                board_2d = obs['board']
+                                for i in range(8):
+                                    for j in range(8):
+                                        piece_val = board_2d[i, j]
+                                        if piece_val > 0:  # White pieces (1-6)
+                                            proper_board[int(piece_val)-1, i, j] = 1.0
+                                        elif piece_val < 0:  # Black pieces (-1 to -6)
+                                            proper_board[int(abs(piece_val))+5, i, j] = 1.0
+                                        else:  # Empty squares
+                                            proper_board[12, i, j] = 1.0
+                            
+                            obs['board'] = proper_board
+                        
                         # If observation already has white_to_move field, use it
                         if 'white_to_move' in obs:
                             return {
@@ -397,7 +419,7 @@ def create_rllib_chess_env(config):
                         # Create a placeholder observation when None is passed
                         return {
                             'board': np.zeros((13, 8, 8), dtype=np.float32),
-                            'action_mask': np.ones(self.env.action_space.n, dtype=np.int8),
+                            'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
                             'white_to_move': 1  # Default to White's turn
                         }
                     else:
@@ -405,7 +427,7 @@ def create_rllib_chess_env(config):
                         print(f"WARNING: Unexpected observation format: {type(obs)}, creating placeholder.")
                         return {
                             'board': np.zeros((13, 8, 8), dtype=np.float32),
-                            'action_mask': np.ones(self.env.action_space.n, dtype=np.int8),
+                            'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
                             'white_to_move': 1  # Default to White's turn
                         }
             
@@ -429,21 +451,41 @@ def create_rllib_chess_env(config):
         
         class PlaceholderEnv(gym.Env):
             def __init__(self):
-                self.action_space = spaces.Discrete(20480)
+                super().__init__()
+                # Define action and observation spaces
+                self.action_space = spaces.Discrete(20480)  # Same as ChessEnv
+                
+                # Define observation space with same structure as ChessEnv
                 self.observation_space = spaces.Dict({
                     'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-                    'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.int8)
+                    'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space.n,), dtype=np.float32),
+                    'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
                 })
             
             def reset(self, **kwargs):
-                return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
-                        'action_mask': np.ones(20480, dtype=np.int8)}, {}
+                # Return a default observation with the correct structure
+                obs = {
+                    'board': np.zeros((13, 8, 8), dtype=np.float32),
+                    'action_mask': np.ones(self.action_space.n, dtype=np.float32),
+                    'white_to_move': 1  # Default to White's turn
+                }
+                # Set empty squares in board representation (channel 12)
+                obs['board'][12, :, :] = 1.0
+                
+                return obs, {}
             
             def step(self, action):
                 # Return a default observation with the correct Gymnasium API format
                 # (obs, reward, terminated, truncated, info)
-                return {'board': np.zeros((13, 8, 8), dtype=np.float32), 
-                        'action_mask': np.ones(20480, dtype=np.int8)}, 0, True, False, {}
+                obs = {
+                    'board': np.zeros((13, 8, 8), dtype=np.float32),
+                    'action_mask': np.ones(self.action_space.n, dtype=np.float32),
+                    'white_to_move': 1  # Default to White's turn
+                }
+                # Set empty squares in board representation (channel 12)
+                obs['board'][12, :, :] = 1.0
+                
+                return obs, 0.0, True, False, {}
         
         return PlaceholderEnv()
 
