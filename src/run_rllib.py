@@ -31,18 +31,18 @@ class ChessMetricsCallback(DefaultCallbacks):
     
     def __init__(self):
         super().__init__()
-        # These variables won't be used for tracking across processes
-        # They'll just be used for tracking during one worker's lifetime
-        self.episode_white_wins = 0
-        self.episode_black_wins = 0
-        self.episode_draws = 0
+        # Initialize counters to zero
+        self.white_wins = 0
+        self.black_wins = 0
+        self.draws = 0
+        self.completed_games = 0
     
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         """Called when an episode ends, to track game outcomes"""
         # Reset counters for this episode
-        self.episode_white_wins = 0
-        self.episode_black_wins = 0
-        self.episode_draws = 0
+        self.white_wins = 0
+        self.black_wins = 0
+        self.draws = 0
         
         # Get info dict from the episode
         info = episode.last_info_for()
@@ -69,13 +69,13 @@ class ChessMetricsCallback(DefaultCallbacks):
             game_outcome = info["game_outcome"]
             
             if game_outcome == "white_win":
-                self.episode_white_wins = 1
+                self.white_wins = 1
                 episode.custom_metrics["white_win"] = 1.0
             elif game_outcome == "black_win":
-                self.episode_black_wins = 1
+                self.black_wins = 1
                 episode.custom_metrics["black_win"] = 1.0
             elif game_outcome == "draw":
-                self.episode_draws = 1
+                self.draws = 1
                 episode.custom_metrics["draw"] = 1.0
             
             # Add move count as a numeric metric
@@ -103,6 +103,8 @@ class ChessMetricsCallback(DefaultCallbacks):
     
     def on_train_result(self, *, algorithm, result, **kwargs):
         """Called after each training iteration, to log chess statistics"""
+        import gc
+        
         # Helper to find metrics recursively in the result structure
         def find_metrics_recursively(data, prefix=""):
             if isinstance(data, dict):
@@ -168,6 +170,13 @@ class ChessMetricsCallback(DefaultCallbacks):
             completion_rate = algorithm.total_completed_games / algorithm.total_episodes * 100
             print(f"Completion Rate: {completion_rate:.1f}%")
         print("----------------------\n")
+        
+        # Explicitly run garbage collection to recover memory
+        gc.collect()
+        
+        # Clear any large temporary variables that might be held
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear GPU memory cache
 
 
 class ChessMaskedModel(TorchModelV2, nn.Module):
@@ -486,9 +495,13 @@ def train(args):
             "normalize_actions": False,
             "log_level": "WARN",  # Reduced logging to improve performance
             # Worker configuration to ensure observation space is correctly initialized
-            "remote_worker_envs": False,
-            "restart_failed_env_runners": True,
-            "restart_failed_sub_environments": True,
+            "remote_worker_envs": True,  # Create environments in separate processes to isolate memory
+            "ignore_worker_failures": True,  # Continue if some workers fail
+            "recreate_failed_workers": True,  # Automatically recreate workers that die
+            "max_num_worker_restarts": 100,   # Allow many worker restarts
+            "keep_per_episode_custom_metrics": False,  # Don't keep custom metrics for all episodes
+            "delay_between_worker_restarts_s": 5.0,  # Wait less time between restarts
+            "metrics_num_episodes_for_smoothing": 25,  # Use fewer episodes for metrics
             "buffer_options": {
                 "reuse_when_possible": True,  # Reuse tensors to reduce memory pressure
                 "inplace_update": True,  # Enable in-place updates for buffers
