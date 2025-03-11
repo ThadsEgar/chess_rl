@@ -63,9 +63,18 @@ class ChessMetricsCallback(DefaultCallbacks):
             outcome = "unknown"
             
             # See if we can get termination info from the episode length
-            if episode.length >= 150:  # Check if we reached move limit
+            if episode.length >= 400:  # Check if we reached move limit
                 print(f"   Episode reached max length ({episode.length}), likely terminated due to move limit")
                 outcome = "draw"  # Assume draw if we reach the move limit
+                
+            # Try to infer outcome from reward (since rewards are only given at the end)
+            elif abs(episode.total_reward) > 0.9:  # If we got a substantial reward
+                if episode.total_reward > 0:
+                    outcome = "white_win"
+                    print(f"   Inferred white win from positive reward: {episode.total_reward}")
+                else:
+                    outcome = "black_win"
+                    print(f"   Inferred black win from negative reward: {episode.total_reward}")
         else:
             # Extract outcome from info, defaulting to "unknown" if not present
             outcome = last_info.get("outcome", "unknown")
@@ -86,24 +95,40 @@ class ChessMetricsCallback(DefaultCallbacks):
         
         episode_id = episode.episode_id
         
-        # Record game outcome
+        # Update local counters
+        white_win = 0
+        black_win = 0
+        draw = 0
+        game_completed = 1  # By default, consider every episode as completed
+        
+        # Set the appropriate counter based on outcome
         if outcome == "white_win":
+            white_win = 1
             self.win_rates["white"].append(1)
             self.win_rates["black"].append(0)
             self.win_rates["draw"].append(0)
         elif outcome == "black_win":
+            black_win = 1
             self.win_rates["white"].append(0)
             self.win_rates["black"].append(1)
             self.win_rates["draw"].append(0)
         elif outcome == "draw":
+            draw = 1
             self.win_rates["white"].append(0)
             self.win_rates["black"].append(0)
             self.win_rates["draw"].append(1)
         else:
-            # Handle unknown outcomes gracefully
+            # Unknown outcome
             self.win_rates["white"].append(0)
             self.win_rates["black"].append(0)
             self.win_rates["draw"].append(0)
+            
+        # IMPORTANT: Register metrics with RLlib's reporting system
+        episode.custom_metrics["white_win"] = white_win
+        episode.custom_metrics["black_win"] = black_win
+        episode.custom_metrics["draw"] = draw
+        episode.custom_metrics["game_completed"] = game_completed
+        episode.custom_metrics["game_length"] = episode.length
             
         # Clean up tracking
         if episode_id in self.is_white_to_move:
@@ -697,13 +722,13 @@ def train(args):
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=10,  # Save every single iteration
+        checkpoint_freq=1,  # Save every iteration
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
         metric="episode_reward_mean",
         mode="max",
-        resume=True,  # Enable checkpoint resumption
+        resume="AUTO",  # AUTO mode: resume if checkpoint exists, otherwise start fresh
         config=config,
     )
     
