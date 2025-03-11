@@ -12,6 +12,7 @@ import ray
 import platform
 import psutil
 import socket
+import numpy as np
 
 from pathlib import Path
 
@@ -117,6 +118,7 @@ def configure_ray(resources, args):
                 ray_config = {
                     "address": args.head_address,
                     "ignore_reinit_error": True,
+                    "disable_env_checking": True,
                 }
                 if args.redis_password:
                     ray_config["_redis_password"] = args.redis_password
@@ -129,6 +131,7 @@ def configure_ray(resources, args):
         ray_config = {
             "ignore_reinit_error": True,
             "include_dashboard": args.dashboard,
+            "disable_env_checking": True,
         }
         
         # Start Ray head node
