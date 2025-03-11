@@ -485,7 +485,7 @@ def train(args):
             "soft_horizon": False,  # Don't reset environments mid-game
             
             # Rollout settings for faster iteration
-            "rollout_fragment_length": 128,  # Smaller fragments for more frequent updates
+            "rollout_fragment_length": "auto",  # Smaller fragments for more frequent updates
             "batch_mode": "truncate_episodes",  # Allow episode truncation for speed
             
             # Single-system optimization
