@@ -60,11 +60,22 @@ pip install "ray[default]"
 echo "Installing Gymnasium and dependencies..."
 pip install gymnasium python-chess matplotlib pandas tensorboard
 
+# Install PySpiel for chess environment
+echo "Checking for PySpiel..."
+if ! python -c "import pyspiel" &> /dev/null; then
+    echo "Installing PySpiel..."
+    pip install open_spiel
+fi
+
+# Setup CUDA paths
+echo "Setting up CUDA paths..."
+echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:\$CONDA_PREFIX/lib/" >> ~/.bashrc
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/
+
 # Clone the repository if it doesn't exist
 if [ ! -d "chess_rl" ]; then
     echo "Cloning Chess RL repository..."
-    git clone https://github.com/YOUR_USERNAME/chess_rl.git
-    # Replace with your actual repository URL
+    git clone https://github.com/ThadsEgar/chess_rl.git
 fi
 
 cd chess_rl
@@ -117,6 +128,20 @@ echo "Environment setup complete!"
 echo "GPU configuration:"
 nvidia-smi
 echo "==============================================="
+
+# Test imports to verify installation
+echo "Testing imports..."
+python -c "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('CUDA device count:', torch.cuda.device_count())"
+python -c "import ray; print('Ray version:', ray.__version__)"
+python -c "import pyspiel; print('PySpiel installed successfully')"
+python -c "import numpy; print('NumPy version:', numpy.__version__)"
+python -c "import chess; print('Python-chess version:', chess.__version__)"
+
+# Create additional directories for data storage
+echo "Creating additional data directories..."
+mkdir -p data/models
+mkdir -p self_play_data
+mkdir -p checkpoints
 
 # Set up Ray dashboard for monitoring (optional)
 echo "To start Ray dashboard for monitoring:"

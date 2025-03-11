@@ -2,6 +2,17 @@
 
 This guide explains how to set up and run your Chess Reinforcement Learning project on Vast.ai.
 
+## Key Dependencies
+
+Your Chess RL implementation relies on several critical dependencies:
+
+- **PyTorch**: For neural network operations and GPU acceleration
+- **Ray/RLlib**: For distributed reinforcement learning
+- **OpenSpiel**: Framework providing the chess environment
+- **Python-Chess**: Library for chess game representation and moves
+
+The setup script automatically installs all these dependencies.
+
 ## Setting Up Your Vast.ai Instance
 
 1. **Select an Instance**:
