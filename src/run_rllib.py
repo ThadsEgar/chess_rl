@@ -683,13 +683,13 @@ def train(args):
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=args.checkpoint_interval,
+        checkpoint_freq=max(1, args.checkpoint_interval // 5),  # Save 5x more frequently for zero-sum games
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
         metric="episode_reward_mean",
         mode="max",
-        resume=None,
+        resume=args.checkpoint,  # Enable checkpoint resumption
         config=config,
     )
     
