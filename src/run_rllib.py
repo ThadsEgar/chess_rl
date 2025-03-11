@@ -494,8 +494,8 @@ def train(args):
             "create_env_on_driver": True,
             "normalize_actions": False,
             "log_level": "WARN",  # Reduced logging to improve performance
-            # Worker configuration to ensure observation space is correctly initialized
-            "remote_worker_envs": True,  # Create environments in separate processes to isolate memory
+            # Memory management settings to stabilize usage
+            "remote_worker_envs": False,  # Can't be True when num_envs_per_env_runner is 1
             "ignore_worker_failures": True,  # Continue if some workers fail
             "recreate_failed_workers": True,  # Automatically recreate workers that die
             "max_num_worker_restarts": 100,   # Allow many worker restarts
@@ -511,7 +511,7 @@ def train(args):
             "soft_horizon": False,  # Don't reset environments mid-game
             
             # Rollout settings for faster iteration
-            "rollout_fragment_length": "auto",  # Shorter fragments to reduce per-worker memory
+            "rollout_fragment_length": 256,  # Shorter fragments to reduce per-worker memory
             "batch_mode": "truncate_episodes",  # Allow episode truncation for speed
             
             # Single-system optimization
