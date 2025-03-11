@@ -637,6 +637,12 @@ def train(args):
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Using checkpoint directory: {checkpoint_dir}")
     
+    # Print exploration strategy
+    print(f"\n===== Exploration Strategy =====")
+    print(f"Initial entropy coefficient: {args.entropy_coeff}")
+    print(f"Annealing schedule: 100% → 50% → 10% over {args.max_iterations} iterations")
+    print(f"This will encourage the agent to explore diverse moves early and exploit its knowledge later.")
+    print(f"================================\n")
     
     # Use a minimalist configuration to avoid conflicts
     config = {
@@ -673,6 +679,14 @@ def train(args):
         "postprocess_inputs": True,  # Allow our callback to process trajectories
         "normalize_actions": False,  # Chess actions are discrete and masked
         
+        # Entropy settings to encourage exploration
+        "entropy_coeff": args.entropy_coeff,  # Add entropy bonus for exploration
+        "entropy_coeff_schedule": [
+            [0, args.entropy_coeff],  # Start with the specified coefficient
+            [args.max_iterations * 0.5, args.entropy_coeff * 0.5],  # Halfway through, halve the coefficient
+            [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
+        ],
+        
         # Memory optimization for lower GPU memory usage
         "_disable_preprocessor_api": False,
         "rollout_fragment_length": "auto",  # Optimize fragment length
@@ -683,7 +697,7 @@ def train(args):
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=max(1, args.checkpoint_interval // 5),  # Save 5x more frequently for zero-sum games
+        checkpoint_freq=max(1, args.checkpoint_interval),  # Save 5x more frequently for zero-sum games
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
@@ -740,6 +754,8 @@ def main():
                         help="Start training from scratch")
     parser.add_argument("--inference_mode", choices=["cpu", "gpu"], default="gpu", 
                         help="Inference mode: cpu or gpu")
+    parser.add_argument("--entropy_coeff", type=float, default=0.01, 
+                        help="Entropy coefficient for PPO")
     
     args = parser.parse_args()
     
