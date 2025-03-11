@@ -97,7 +97,7 @@ class ChessMetricsCallback(DefaultCallbacks):
                 elif reason == "fifty_move_rule":
                     episode.custom_metrics["term_fifty_move"] = 1.0
                 elif reason == "threefold_repetition":
-                    episode.custom_metrics["term_repetition"] = 1.0
+                     episode.custom_metrics["term_repetition"] = 1.0
                 elif reason == "move_limit_exceeded":
                     episode.custom_metrics["term_move_limit"] = 1.0
     
@@ -442,7 +442,7 @@ def train(args):
             "gamma": 0.99,
             "lambda": 0.95,
             "kl_coeff": 0.2,
-            "train_batch_size": 16000,    # Increased from 4000 for better GPU utilization
+            "train_batch_size": 60000,    # Increased from 4000 for better GPU utilization
             "sgd_minibatch_size": 2000,   # Increased from 128 for better GPU utilization
             "num_sgd_iter": 10,           # Reduced from 30 to prevent overfitting and speed up training
             "lr": 3e-4,
@@ -476,7 +476,7 @@ def train(args):
             "batch_mode": "truncate_episodes",  # Allow episode truncation during sampling
             
             # Optimize CPU usage
-            "num_envs_per_env_runner": 2,        # Each worker runs multiple environments in parallel
+            "num_envs_per_env_runner": 4,        # Each worker runs multiple environments in parallel
             
             # Lower worker memory usage to avoid crashes
             "num_gpus_per_env_runner": 0.0,  # Don't allocate GPU memory to workers
