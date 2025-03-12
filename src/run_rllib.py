@@ -16,7 +16,7 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
-from ray.rllib.core.models.torch import TorchRLModule
+from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.core.rl_module.rl_module import RLModuleConfig
 from ray.rllib.models import ModelCatalog
 from ray.rllib.utils.framework import try_import_torch
