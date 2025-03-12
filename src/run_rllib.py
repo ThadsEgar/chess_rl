@@ -747,7 +747,6 @@ def train(args):
             include_dashboard=args.dashboard,
             _redis_password=args.redis_password,
             num_cpus=detected_cpus,
-            num_gpus=detected_gpus,
         )
     else:
         ray.init(
@@ -755,57 +754,60 @@ def train(args):
             ignore_reinit_error=True,
             include_dashboard=args.dashboard,
             num_cpus=detected_cpus,
-            num_gpus=detected_gpus,
         )
     
     # Hardware configuration for 6x RTX 3090, 85 vCPUs, 124GB RAM
     print("\n===== Hardware Configuration =====")
     print(f"Ray runtime resources: {ray.available_resources()}")
-    target_gpus = 6  # Target for 6 RTX 3090s
-    actual_gpus = min(target_gpus, int(ray.available_resources().get("GPU", 0)))
-    target_cpus = 128  # Target for 128 CPU cores
-    actual_cpus = min(target_cpus, int(ray.available_resources().get("CPU", 0)))
+    actual_gpus = int(ray.available_resources().get("GPU", 0))
+    actual_cpus = int(ray.available_resources().get("CPU", 0))
     
-    print(f"Optimizing for {actual_gpus} GPUs and {actual_cpus} CPU cores")
-    print("Using 3.0/3.0 split between driver and workers for optimal large-batch training")
+    print(f"Available resources: {actual_gpus} GPUs and {actual_cpus} CPU cores")
     
-    # Resource allocation - adjusted for 3.0/3.0 GPU split
-    driver_cpus = max(4, actual_cpus // 5)  # Allocate ~20% for driver
-    num_workers = max(4, actual_cpus // 5)  # Allocate workers based on available CPUs
-    cpus_per_worker = max(1, (actual_cpus - driver_cpus) // num_workers)
+    # Resource allocation - use fixed values as requested
+    cpus_per_worker = 4  # Fixed at 4 CPUs per worker as requested
+    driver_cpus = 16      # Fixed allocation for driver
+    
+    # Calculate how many workers we can have with the remaining CPUs
+    remaining_cpus = actual_cpus - driver_cpus
+    num_workers = max(1, remaining_cpus // cpus_per_worker)
+    
     num_envs = 8  # Environments per worker
     
-    # GPU allocation - use integers for better precision
-    if actual_gpus >= 6:
-        driver_gpus = 3  # Integer - 3 GPUs for driver
-        worker_gpus = 3  # Integer - 3 GPUs for workers
-    else:
-        # For fewer GPUs, allocate half to driver, half to workers
-        driver_gpus = actual_gpus // 2  # Integer division
-        worker_gpus = actual_gpus - driver_gpus  # Ensure exact sum
+    # GPU allocation - use a simple integer division approach
+    driver_gpus = 1  # Allocate 1 GPU for driver (if available)
     
-    # Calculate GPUs per worker with proper rounding
+    # Calculate worker GPUs (ensure at least one driver GPU if any are available)
+    worker_gpus = max(0, actual_gpus - driver_gpus)
+    
+    # Calculate GPUs per worker (use integer division and only convert to float at the end)
     if num_workers > 0 and worker_gpus > 0:
-        # Use integer division and convert back to float if needed
-        gpus_per_worker = worker_gpus / num_workers
-        # Round to 6 decimal places to avoid floating point precision issues
-        gpus_per_worker = round(gpus_per_worker, 4)
+        # Integer division first
+        gpus_per_worker_int = worker_gpus // num_workers
+        gpus_per_worker_remainder = worker_gpus % num_workers
+        
+        # Only convert to float if there's a remainder to distribute
+        if gpus_per_worker_remainder > 0:
+            gpus_per_worker = gpus_per_worker_int + (gpus_per_worker_remainder / num_workers)
+            # Round to 3 decimal places to avoid floating point issues
+            gpus_per_worker = round(gpus_per_worker, 3)
+        else:
+            gpus_per_worker = float(gpus_per_worker_int)
     else:
         gpus_per_worker = 0.0
     
     # Batch sizes based on available resources
-    train_batch_size = 262144 if actual_gpus >= 3 else 131072  # Scale down for fewer GPUs
-    sgd_minibatch_size = 16384 if actual_gpus >= 3 else 8192
+    train_batch_size = 131072
+    sgd_minibatch_size = 8192
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
     print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request} of {actual_cpus} available")
     
     # Verify that our GPU allocation math is precise
     total_gpu_request = driver_gpus + (gpus_per_worker * num_workers)
-    # Round to 6 decimal places to avoid floating point precision issues in display
-    total_gpu_request = round(total_gpu_request, 6)
-    print(f"GPU allocation: {driver_gpus} (driver) + {worker_gpus} (workers) = {total_gpu_request} total")
-    print(f"GPU per worker: {gpus_per_worker:.6f}")
+    # Round to avoid floating point precision issues
+    total_gpu_request = round(total_gpu_request, 3)
+    print(f"GPU allocation: {driver_gpus} (driver) + {gpus_per_worker}*{num_workers} (workers) = {total_gpu_request} total of {actual_gpus} available")
     print(f"Batch size: {train_batch_size} (train) / {sgd_minibatch_size} (SGD)")
     print("==================================\n")
     
