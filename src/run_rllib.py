@@ -789,7 +789,7 @@ def train(args):
         # Use integer division and convert back to float if needed
         gpus_per_worker = worker_gpus / num_workers
         # Round to 6 decimal places to avoid floating point precision issues
-        gpus_per_worker = round(gpus_per_worker, 6)
+        gpus_per_worker = round(gpus_per_worker, 4)
     else:
         gpus_per_worker = 0.0
     
@@ -854,8 +854,8 @@ def train(args):
         "num_cpus_for_driver": int(driver_cpus),  # Ensure integer
         "num_workers": int(num_workers),  # Ensure integer
         "num_cpus_per_env_runner": int(cpus_per_worker),  # Ensure integer
-        "num_gpus": float(int(driver_gpus)) if driver_gpus == int(driver_gpus) else round(driver_gpus, 6),  # Clean float
-        "num_gpus_per_env_runner": round(gpus_per_worker, 6),  # Round to 6 decimal places
+        "num_gpus": float(int(driver_gpus)) if driver_gpus == int(driver_gpus) else round(driver_gpus, 4),  # Clean float
+        "num_gpus_per_env_runner": round(gpus_per_worker, 4),  # Round to 6 decimal places
         "num_envs_per_env_runner": int(num_envs),  # Ensure integer
         
         # Model configuration
