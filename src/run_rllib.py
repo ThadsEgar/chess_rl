@@ -737,19 +737,37 @@ def train(args):
             include_dashboard=args.dashboard
         )
     
-    # Get total available CPU cores
+    # Hardware detection - optimize for 6x RTX 3090, 85 vCPUs, 124GB RAM
     import multiprocessing
-    total_cpus = 122  # Hardcode the available CPUs based on error message
-    print(f"Total available CPU cores: {total_cpus}")
     
-    # Use a very conservative resource allocation to avoid conflicts
-    driver_cpus = 8
-    num_workers = 4
-    cpus_per_worker = 28  # Much lower than before to avoid any resource conflicts
-    num_envs = 28  # Greatly reduced to ensure stability
+    # Hardware configuration for 6x RTX 3090
+    print("\n===== Hardware Configuration =====")
+    print("Optimizing for 6 GPUs and 128 CPU cores")
+    print("Using 3.0/3.0 split between driver and workers for optimal large-batch training")
+    total_gpus = 6
+    total_cpus = 128
+    
+    # Resource allocation - adjusted for 3.0/3.0 GPU split
+    driver_cpus = 16  # Increased from 10 to utilize additional CPU cores
+    num_workers = 20  # Increased from 16 to utilize additional CPU cores
+    cpus_per_worker = 4  # Increased from 4 for better processing
+    num_envs = 8  # Increased environments per worker for better parallelism
+    
+    # GPU allocation - 3.0/3.0 split as requested
+    driver_gpus = 3.0  # 3 GPUs for driver to handle large batch SGD updates
+    worker_gpus = 3.0  # 3 GPUs distributed across workers
+    gpus_per_worker = worker_gpus / num_workers  # ~0.15 GPU per worker
+    
+    # Batch sizes optimized for 3.0 driver GPUs
+    train_batch_size = 262144  # 256K
+    sgd_minibatch_size = 16384  # 16K
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
-    print(f"Total CPU request: {total_cpu_request} of {total_cpus} available")
+    print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request} of {total_cpus} available")
+    print(f"GPU allocation: {driver_gpus} (driver) + {worker_gpus} (workers) = {total_gpus} total")
+    print(f"GPU per worker: {gpus_per_worker:.4f}")
+    print(f"Batch size: {train_batch_size} (train) / {sgd_minibatch_size} (SGD)")
+    print("==================================\n")
     
     # Register the custom model and environment
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
@@ -767,34 +785,44 @@ def train(args):
     print(f"This will encourage the agent to explore diverse moves early and exploit its knowledge later.")
     print(f"================================\n")
     
-    # Use a minimalist configuration to avoid conflicts
+    # Optimize configuration for 6x RTX 3090, 85 vCPUs, 124GB RAM
     config = {
         "env": "chess_env",
         "framework": "torch",
         "disable_env_checking": True,
         "_enable_rl_module_api": False,
         "_enable_learner_api": False,
+        
+        # Resource allocation
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
         "num_cpus_per_worker": cpus_per_worker,
-        "num_gpus": 2,  # Driver uses 2 GPU
-        "num_gpus_per_worker": 0.5,  # Workers share remaining GPUs
+        "num_gpus": driver_gpus,
+        "num_gpus_per_worker": gpus_per_worker,
         "num_envs_per_worker": num_envs,
+        
+        # Model configuration
         "model": {
             "custom_model": "chess_masked_model",
             "custom_model_config": {"handle_missing_action_mask": True}
         },
-        "train_batch_size": 32768,
-        "sgd_minibatch_size": 4096,
-        "num_sgd_iter": 5,
-        "lr": 1e-4,  # Reduced from 3e-4 for numerical stability
+        
+        # Training parameters optimized for 6 GPUs and 128 CPU cores with 3.0/3.0 GPU split
+        "train_batch_size": train_batch_size,
+        "sgd_minibatch_size": sgd_minibatch_size,
+        "num_sgd_iter": 10,
+        "lr": 1e-4,  # Reduced for numerical stability
         "callbacks": ChessMetricsCallback,
-        "create_env_on_driver": True,
+        "create_env_on_driver": False,  # Disable environment on driver to save resources
         "compress_observations": True,
-        "log_level": "INFO",  # Debug startup
+        "log_level": "INFO",
         
         # Gradient clipping to prevent NaN issues
         "grad_clip": 1.0,
+        
+        # Training Optimization - use GPU-optimized experience batches
+        "batch_mode": "truncate_episodes",  # Process data in fixed-size chunks for better GPU utilization
+        "preprocessor_pref": None,  # Skip preprocessing for performance
         
         # Zero-sum game specific settings
         "gamma": 1.0,  # No temporal discounting for chess (outcome only matters at end)
@@ -813,16 +841,15 @@ def train(args):
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
         
-        # Use StochasticSampling for exploration instead of None
-        # This is a baseline exploration strategy that works with our custom model's logic
+        # Use StochasticSampling for exploration
         "exploration_config": {
             "type": "StochasticSampling",
         },
         
-        # Memory optimization for lower GPU memory usage
+        # Memory optimization for efficient GPU memory usage
         "_disable_preprocessor_api": False,
-        "rollout_fragment_length": "auto",  # Optimize fragment length
-        "_use_trajectory_view_api": True,  # More memory-efficient view
+        "rollout_fragment_length": 1200,  # Increased for better GPU utilization with more CPUs
+        "_use_trajectory_view_api": True,
         "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
     }
 
@@ -839,7 +866,7 @@ def train(args):
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=50,  # Save every 50 iteration
+        checkpoint_freq=25,  # Save checkpoint every 25 iterations (increased frequency)
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
@@ -971,7 +998,7 @@ def main():
                         help="Enable Ray dashboard")
     parser.add_argument("--num_workers", type=int, default=2, 
                         help="Number of worker processes")
-    parser.add_argument("--max_iterations", type=int, default=5000, 
+    parser.add_argument("--max_iterations", type=int, default=10000, 
                         help="Maximum number of training iterations")
     parser.add_argument("--checkpoint_dir", type=str, default="rllib_checkpoints", 
                         help="Directory to save checkpoints")
