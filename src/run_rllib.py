@@ -233,119 +233,45 @@ class ChessMaskedRLModule(TorchRLModule):
         }
     
     def _forward_exploration(self, batch, **kwargs):
-        """Forward pass with exploration possibilities"""
-        # Extract tensor components
-        if isinstance(batch, dict) and "board" in batch:
-            board = batch["board"]
-            action_mask = batch["action_mask"]
-            print(f"Exploration with dict batch: board shape={board.shape}, action_mask shape={action_mask.shape}")
-        else:
-            # Handle non-dict inputs (should be rare with the wrapper)
-            device = next(self.parameters()).device
-            # Create a default batch size of 1 if batch is not a tensor with shape
-            batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
-            print(f"Exploration with non-dict batch: type={type(batch)}, batch_size={batch_size}")
-            board = torch.zeros((batch_size, 13, 8, 8), device=device)
-            action_mask = torch.zeros((batch_size, 20480), device=device)
+        if not isinstance(batch, dict) or 'board' not in batch or 'action_mask' not in batch:
+            raise ValueError(f"Expected dict batch with 'board' and 'action_mask', got {type(batch)}: {batch}")
         
-        # Get device from the input tensors
-        device = board.device
-        
-        # Ensure we have a batch dimension
-        if len(board.shape) == 3:  # If missing batch dimension (13, 8, 8)
-            board = board.unsqueeze(0)  # Add batch dimension -> (1, 13, 8, 8)
-            
-        if len(action_mask.shape) == 1:  # If missing batch dimension (20480,)
-            action_mask = action_mask.unsqueeze(0)  # Add batch dimension -> (1, 20480)
-            
-        # Get batch size from board tensor
+        board = batch['board']
+        action_mask = batch['action_mask']
         batch_size = board.shape[0]
-            
-        # Process through CNN feature extractor
+        device = board.device
+
+        if board.shape[1:] != (13, 8, 8) or action_mask.shape[1:] != (20480,):
+            raise ValueError(f"Unexpected shapes: board={board.shape}, action_mask={action_mask.shape}")
+
         features = self.features_extractor(board)
-        
-        # Add small epsilon to features to avoid NaN issues
         features = features + 1e-8
-        
-        # Get raw action outputs (logits)
         action_logits = self.policy_head(features)
-        
-        # Get value estimate
         value = self.value_head(features)
-        
-        # Apply action mask by setting illegal actions to a large negative number
-        if action_mask is not None:
-            # Apply the mask to the logits
-            inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
-            masked_logits = action_logits + inf_mask
-            
-            # Simple epsilon-greedy exploration - only apply during training
-            if self.random_exploration:
-                # Decay epsilon over time
-                self.update_epsilon()
-                
-                # Generate random numbers to decide which samples get random actions
-                random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
-                
-                # For samples selected for random exploration
-                for i in range(batch_size):
-                    if random_samples[i]:
-                        # Find legal actions (mask value == 1 or equivalently, where inf_mask == 0)
-                        legal_actions = torch.where(action_mask[i] > 0)[0]
-                        
-                        # Only proceed if there are legal actions
-                        if len(legal_actions) > 0:
-                            # Choose a random legal action
-                            random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,), device=device)].item()
-                            
-                            # Use smaller values for more numerical stability (5.0 instead of 10.0)
-                            masked_logits[i] = torch.full_like(masked_logits[i], -5.0)
-                            masked_logits[i, random_action_idx] = 5.0
-            
-            # Apply gradient clipping to logits
-            masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
-            
-            # Get the most likely action (for deterministic policy)
-            actions = torch.argmax(masked_logits, dim=-1)
-            
-            # Ensure value has the same batch dimension as actions
-            if value.shape[0] != batch_size:
-                # If value is a single value, expand it to match batch size
-                if len(value.shape) == 1:
-                    value = value.repeat(batch_size, 1)
-                else:
-                    # If value is already batched but wrong size, repeat it
-                    value = value.repeat(batch_size, 1)
-            
-            # Print shapes for debugging
-            print(f"Output shapes - masked_logits: {masked_logits.shape}, value: {value.shape}, actions: {actions.shape}")
-                
-            return {
-                "action_dist": masked_logits, 
-                "vf": value,
-                "actions": actions
-            }
-        
-        # If no action mask available, return unmasked logits (with clipping)
-        action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
-        actions = torch.argmax(action_logits, dim=-1)
-        
-        # Ensure value has the same batch dimension as actions
-        if value.shape[0] != batch_size:
-            # If value is a single value, expand it to match batch size
-            if len(value.shape) == 1:
-                value = value.repeat(batch_size, 1)
-            else:
-                # If value is already batched but wrong size, repeat it
-                value = value.repeat(batch_size, 1)
-            
-        # Print shapes for debugging
-        print(f"Output shapes - action_logits: {action_logits.shape}, value: {value.shape}, actions: {actions.shape}")
-            
+
+        inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
+        masked_logits = action_logits + inf_mask
+
+        if self.random_exploration:
+            self.update_epsilon()
+            random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
+            for i in range(batch_size):
+                if random_samples[i]:
+                    legal_actions = torch.where(action_mask[i] > 0)[0]
+                    if len(legal_actions) == 0:
+                        raise ValueError(f"No legal actions in batch index {i}, action_mask sum: {action_mask[i].sum()}")
+                    random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,), device=device)].item()
+                    masked_logits[i] = torch.full_like(masked_logits[i], -5.0)
+                    masked_logits[i, random_action_idx] = 5.0
+
+        masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
+        actions = torch.argmax(masked_logits, dim=-1)
+        value = value.view(batch_size, 1)  # Ensure value matches batch size
+
         return {
-            "action_dist": action_logits, 
-            "vf": value,
-            "actions": actions
+            'action_dist': masked_logits,
+            'vf': value,
+            'actions': actions
         }
     
     def forward(self, batch, **kwargs):
@@ -381,148 +307,66 @@ def create_rllib_chess_env(config):
         class DictObsWrapper(gym.Wrapper):
             def __init__(self, env):
                 super().__init__(env)
-                # Define the correct observation space as Dict
                 self.observation_space = spaces.Dict({
                     'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
                     'action_mask': spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32),
-                    'white_to_move': spaces.Discrete(2)  # Boolean flag: 0=False (Black's turn), 1=True (White's turn)
+                    'white_to_move': spaces.Discrete(2)
                 })
-            
+                self.action_space = env.action_space
+
             def reset(self, **kwargs):
                 result = self.env.reset(**kwargs)
                 if isinstance(result, tuple):
                     obs, info = result
-                    return self._wrap_observation(obs), info
                 else:
-                    return self._wrap_observation(result)
-            
+                    obs, info = result, {}
+                return self._wrap_observation(obs), self._ensure_info(info)
+
             def step(self, action):
                 result = self.env.step(action)
-                if len(result) == 4:  # obs, reward, done, info (old style)
+                if len(result) == 4:
                     obs, reward, done, info = result
-                    # Convert to new Gymnasium API (obs, reward, terminated, truncated, info)
-                    info = self._ensure_info(info)
-                    return self._wrap_observation(obs), reward, done, False, info
-                elif len(result) == 5:  # obs, reward, terminated, truncated, info (new style)
+                    terminated, truncated = done, False
+                else:
                     obs, reward, terminated, truncated, info = result
-                    info = self._ensure_info(info)
-                    return self._wrap_observation(obs), reward, terminated, truncated, info
-                else:
-                    # Handle unexpected result format
-                    print(f"WARNING: Unexpected step result format with {len(result)} elements")
-                    # Return a safe default with the correct format
-                    return self._wrap_observation(None), 0.0, True, False, {"outcome": "unknown"}
-            
+                wrapped_obs = self._wrap_observation(obs)
+                info = self._ensure_info(info)
+                # Ensure action mask has at least one legal move if not done
+                if not (terminated or truncated):
+                    assert wrapped_obs['action_mask'].sum() > 0, "No legal actions available in non-terminal state"
+                return wrapped_obs, reward, terminated, truncated, info
+
             def _wrap_observation(self, obs):
-                # Check board shape and fix if needed
-                if isinstance(obs, dict) and 'board' in obs and (not isinstance(obs['board'], np.ndarray) or obs['board'].shape != (13, 8, 8)):
-                    print(f"Warning: Fixing board shape from {getattr(obs['board'], 'shape', 'unknown')} to (13, 8, 8)")
-                    # Create a proper shape board with zeros
-                    proper_board = np.zeros((13, 8, 8), dtype=np.float32)
-                    
-                    # If it's a 2D board, try to convert it to channel format
-                    if isinstance(obs['board'], np.ndarray) and len(obs['board'].shape) == 2 and obs['board'].shape == (8, 8):
-                        # Set channel values based on piece values
-                        board_2d = obs['board']
-                        for i in range(8):
-                            for j in range(8):
-                                piece_val = board_2d[i, j]
-                                if piece_val > 0:  # White pieces (1-6)
-                                    proper_board[int(piece_val)-1, i, j] = 1.0
-                                elif piece_val < 0:  # Black pieces (-1 to -6)
-                                    proper_board[int(abs(piece_val))+5, i, j] = 1.0
-                                else:  # Empty squares
-                                    proper_board[12, i, j] = 1.0
-                        obs['board'] = proper_board
-                    else:
-                        # Default handling for other cases
-                        proper_board[12, :, :] = 1.0  # Set empty squares
-                        obs['board'] = proper_board
-                                
-                # Convert observation to Dict format if it's not already
-                if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
-                    # If observation already has white_to_move field, use it
-                    if 'white_to_move' in obs:
-                        return {
-                            'board': obs['board'],
-                            'action_mask': obs['action_mask'],
-                            'white_to_move': int(obs['white_to_move'])  # Convert to int for Discrete space
-                        }
-                    else:
-                        # Add a default white_to_move (assuming White's turn)
-                        return {
-                            'board': obs['board'],
-                            'action_mask': obs['action_mask'],
-                            'white_to_move': 1  # Default to White's turn if not specified
-                        }
-                elif obs is None:
-                    # Create a placeholder observation when None is passed
+                if obs is None or not isinstance(obs, dict) or 'board' not in obs or 'action_mask' not in obs:
+                    print(f"Warning: Invalid observation {type(obs)}, using placeholder")
                     return {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
                         'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
-                        'white_to_move': 1  # Default to White's turn
+                        'white_to_move': 1
                     }
-                else:
-                    # Create a placeholder observation with reasonable defaults
-                    print(f"WARNING: Unexpected observation format: {type(obs)}, creating placeholder.")
-                    return {
-                        'board': np.zeros((13, 8, 8), dtype=np.float32),
-                        'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
-                        'white_to_move': 1  # Default to White's turn
-                    }
-                    
+                board = np.asarray(obs['board'], dtype=np.float32)
+                action_mask = np.asarray(obs['action_mask'], dtype=np.float32)
+                white_to_move = int(obs.get('white_to_move', 1))
+                # Enforce correct shapes
+                if board.shape != (13, 8, 8):
+                    print(f"Warning: Fixing board shape from {board.shape} to (13, 8, 8)")
+                    board = np.zeros((13, 8, 8), dtype=np.float32)
+                if action_mask.shape != (self.action_space.n,):
+                    print(f"Warning: Fixing action_mask shape from {action_mask.shape}")
+                    action_mask = np.ones(self.action_space.n, dtype=np.float32)
+                return {
+                    'board': board,
+                    'action_mask': action_mask,
+                    'white_to_move': white_to_move
+                }
+
             def _ensure_info(self, info):
-                """Ensure the info dictionary has the required fields"""
-                if info is None:
+                if not isinstance(info, dict):
                     info = {}
-                
-                # Ensure outcome is always present
-                if "outcome" not in info:
-                    # Try to extract info from the environment if possible
-                    if hasattr(self.env, 'env') and hasattr(self.env.env, 'board'):
-                        # Get direct access to the chess board
-                        board = self.env.env.board
-                        
-                        # Check game state conditions
-                        if board.is_checkmate():
-                            # Who won?
-                            if board.turn:  # Black's turn now, so White won
-                                info["outcome"] = "white_win"
-                                info["game_outcome"] = "white_win"
-                            elif not board.turn:  # White's turn now, so Black won
-                                info["outcome"] = "black_win"
-                                info["game_outcome"] = "black_win"
-                        elif board.is_stalemate() or board.is_insufficient_material() or board.is_fifty_moves() or board.is_repetition():
-                            info["outcome"] = "draw"
-                            info["game_outcome"] = "draw"
-                        elif hasattr(self.env.env, 'move_count') and hasattr(self.env.env, 'max_moves') and self.env.env.move_count >= self.env.env.max_moves:
-                            info["outcome"] = "draw"
-                            info["game_outcome"] = "draw"
-                            info["termination_reason"] = "move_limit_exceeded"
-                        # If game_outcome exists, use that
-                        elif "game_outcome" in info:
-                            info["outcome"] = info["game_outcome"]
-                        else:
-                            info["outcome"] = "unknown"
-                    else:
-                        # If outcome exists, use that
-                        if "game_outcome" in info:
-                            info["outcome"] = info["game_outcome"]
-                        else:
-                            info["outcome"] = "unknown"
-                
-                # Ensure game_outcome is always present
-                if "game_outcome" not in info:
-                    # If outcome exists, use that
-                    if "outcome" in info:
-                        info["game_outcome"] = info["outcome"]
-                    else:
-                        info["game_outcome"] = "unknown"
-                
-                # Add termination_reason if not present
-                if "termination_reason" not in info:
-                    info["termination_reason"] = "unknown"
-                
+                if 'outcome' not in info:
+                    info['outcome'] = 'unknown'
+                if 'termination_reason' not in info:
+                    info['termination_reason'] = 'unknown'
                 return info
                     
         # Always apply the wrapper to ensure consistent observation format
