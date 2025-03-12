@@ -70,9 +70,14 @@ class ChessMetricsCallback(DefaultCallbacks):
 class ChessMaskedRLModule(TorchRLModule):
     """Custom RLModule for Chess that supports action masking - compatible with the new RLlib API stack"""
     
-    def __init__(self, observation_space=None, action_space=None, inference_only=False, learner_only=False, model_config=None):
-        super().__init__(observation_space=observation_space, action_space=action_space, 
-                         inference_only=inference_only, learner_only=learner_only, model_config=model_config)
+    def __init__(self, observation_space=None, action_space=None, inference_only=False, learner_only=False, model_config=None, **kwargs):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            inference_only=inference_only,
+            learner_only=learner_only,
+            model_config=model_config or {}
+        )
         
         # Get spaces
         obs_space = observation_space
