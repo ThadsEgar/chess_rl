@@ -676,7 +676,7 @@ def train(args):
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
         "sample_timeout_s": 600,  # Increase timeout to 20 seconds
-        "rollout_fragment_length": 200,  # Reduce fragment length for faster sampling
+        "rollout_fragment_length": "auto",  # Reduce fragment length for faster sampling
         "num_envs_per_env_runner": 4,  # Use a single environment per worker
         "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
         "callbacks": ChessMetricsCallback,  # Add metrics callback
