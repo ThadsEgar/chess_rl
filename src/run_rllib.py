@@ -738,14 +738,14 @@ def train(args):
             ignore_reinit_error=True, 
             include_dashboard=args.dashboard,
             _redis_password=args.redis_password,
-            num_cpus=124,
+            num_cpus=120,
         )
     else:
         ray.init(
             address="auto" if args.distributed else None,
             ignore_reinit_error=True,
             include_dashboard=args.dashboard,
-            num_cpus=124,
+            num_cpus=120,
         )
     
     # Hardware configuration - using fixed allocation as requested
@@ -756,11 +756,11 @@ def train(args):
     # - 3:3 GPU split
     # - 20 workers with 4 CPUs each
     driver_gpus = 2           # Fixed at 3 GPUs for driver
-    worker_gpus = 3.95           # Fixed at 3 GPUs for workers
+    worker_gpus = 3.9999           # Fixed at 3 GPUs for workers
     num_workers = 8          # Fixed at 20 workers
-    cpus_per_worker = 9       # Fixed at 4 CPUs per worker
-    driver_cpus = 10       # Fixed at 8 CPUs for driver
-    num_envs = 10            # Environments per worker
+    cpus_per_worker = 8       # Fixed at 4 CPUs per worker
+    driver_cpus = 16       # Fixed at 8 CPUs for driver
+    num_envs = 16            # Environments per worker
     
     # Calculate exact GPU allocation per worker
     if num_workers > 0 and worker_gpus > 0:
