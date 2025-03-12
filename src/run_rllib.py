@@ -630,72 +630,19 @@ def train(args):
         "disable_env_checking": True,
         "_enable_rl_module_api": True,
         "_enable_learner_api": True,
-        "enable_rl_module_and_learner": True,
-        
-        # Resource allocation - use whole numbers as requested
-        "num_cpus_for_driver": driver_cpus,
-        "num_workers": num_workers,
-        "num_cpus_per_env_runner": cpus_per_worker,
-        "num_gpus": 0.0,                           # Driver doesn't need a dedicated GPU
-        "num_gpus_per_env_runner": 0.0,            # Workers don't need GPUs with learner API
-        "num_envs_per_env_runner": num_envs,
-        
-        # Configure learners for optimal GPU utilization
-        "num_learners": 4,                         # Use 4 learner processes (one per GPU)
-        "num_gpus_per_learner": 1.0,               # Allocate 1 full GPU to each learner
-        "torch_compile_learner": True,             # Use torch.compile() for better performance
-        
-        # Model configuration - use the new format for RLModule
-        "module": ChessMaskedRLModule,
-        "module_config": {
-            "handle_missing_action_mask": True,
-            "no_final_linear": True,  # Prevent RLlib from adding extra layers
-            "evaluation_mode": False  # Explicitly set training mode
+        "num_workers": 12,
+        "num_cpus_per_env_runner": 4,
+        "num_gpus_per_learner": 1.0,
+        "num_learners": 4,
+        "rl_module_spec": {
+            "module_class": ChessMaskedRLModule,
+            "model_config_dict": {"evaluation_mode": False}
         },
-        
-        # Disable preprocessors that are causing the dimension mismatch
-        "preprocessor_pref": None,
-        "_disable_preprocessor_api": True,
-        "observation_filter": "NoFilter",
-        "compress_observations": False,
-        
-        # Training parameters
-        "train_batch_size": int(train_batch_size),  # Ensure integer
-        "sgd_minibatch_size": int(sgd_minibatch_size),  # Ensure integer
-        "mini_batch_size": int(sgd_minibatch_size),
-        "num_sgd_iter": 3,                         # Reduce iteration count for faster training
-        "num_epochs": 3,                            # Fewer epochs for faster training
-        "lr": 5e-5,  # Reduced for numerical stability
-        "callbacks": None,
-        "create_env_on_driver": False,  # Disable environment on driver to save resources
-        "log_level": "INFO",
-        
-        # Gradient clipping to prevent NaN issues
+        "train_batch_size": 131072,
+        "sgd_minibatch_size": 16384,
+        "lr": 5e-5,
         "grad_clip": 1.0,
-        
-        # Training Optimization - use GPU-optimized experience batches
-        "batch_mode": "truncate_episodes",  # Process data in fixed-size chunks for better GPU utilization
-        "rollout_fragment_length": "auto",  # Increased for better GPU utilization with more CPUs
-        "_use_trajectory_view_api": True,
-        "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
-        
-        # Zero-sum game specific settings
-        "gamma": 1.0,  # No temporal discounting for chess (outcome only matters at end)
-        "lambda": 1.0,  # Use Monte Carlo estimate for advantage
-        "use_critic": True,
-        "use_gae": True,
-        "vf_loss_coeff": 1.0,  # Balance policy and value function losses
-        "postprocess_inputs": True,  # Allow our callback to process trajectories
-        "normalize_actions": False,  # Chess actions are discrete and masked
-        
-        # Ensure metrics are reported properly with learner API
-        "report_env_runner_metrics": True,
-        
-        # Entropy settings to encourage exploration
-        "entropy_coeff": args.entropy_coeff,  # Add entropy bonus for exploration
-        
-        # Optional but helpful performance improvements
-        "simple_optimizer": True,                  # Better memory utilization
+        "entropy_coeff": args.entropy_coeff
     }
     
     print("\n===== Multi-GPU Learner Configuration =====")
