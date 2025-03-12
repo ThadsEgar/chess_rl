@@ -233,11 +233,16 @@ class ChessMaskedRLModule(TorchRLModule):
         }
     
     def _forward_exploration(self, batch, **kwargs):
-        if not isinstance(batch, dict) or 'board' not in batch or 'action_mask' not in batch:
-            raise ValueError(f"Expected dict batch with 'board' and 'action_mask', got {type(batch)}: {batch}")
+        if 'obs' not in batch:
+            raise ValueError("Expected 'obs' key in batch")
         
-        board = batch['board']
-        action_mask = batch['action_mask']
+        obs = batch['obs']
+        
+        if not isinstance(obs, dict) or 'board' not in obs or 'action_mask' not in obs:
+            raise ValueError("Expected 'obs' to be a dict with 'board' and 'action_mask'")
+        
+        board = obs['board']
+        action_mask = obs['action_mask']
         batch_size = board.shape[0]
         device = board.device
 
