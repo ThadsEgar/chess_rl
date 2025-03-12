@@ -758,9 +758,9 @@ def train(args):
     driver_gpus = 2           # Fixed at 3 GPUs for driver
     worker_gpus = 4           # Fixed at 3 GPUs for workers
     num_workers = 10          # Fixed at 20 workers
-    cpus_per_worker = 8       # Fixed at 4 CPUs per worker
-    driver_cpus = 8           # Fixed at 8 CPUs for driver
-    num_envs = 8              # Environments per worker
+    cpus_per_worker = 10       # Fixed at 4 CPUs per worker
+    driver_cpus = 10       # Fixed at 8 CPUs for driver
+    num_envs = 10            # Environments per worker
     
     # Calculate exact GPU allocation per worker
     if num_workers > 0 and worker_gpus > 0:
