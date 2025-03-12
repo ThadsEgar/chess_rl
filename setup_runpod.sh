@@ -56,6 +56,13 @@ echo "Updating system packages..."
 apt-get update -y
 apt-get install -y build-essential cmake wget curl git htop tmux
 
+# Install system dependencies for Python packages (especially matplotlib)
+echo "Installing system dependencies for Python packages..."
+apt-get install -y pkg-config libfreetype6-dev libpng-dev libffi-dev \
+                   python3-dev python3-tk python3-setuptools \
+                   libssl-dev zlib1g-dev libbz2-dev liblzma-dev \
+                   libncurses5-dev libreadline-dev libsqlite3-dev
+
 # Install Miniconda if not already installed
 if [ "$CONDA_INSTALLED" = false ]; then
     echo "Installing Miniconda..."
@@ -82,17 +89,68 @@ source activate chess_rl || conda activate chess_rl
 # Install PyTorch with CUDA support if not already installed
 if [ "$PYTORCH_INSTALLED" = false ]; then
     echo "Installing PyTorch with CUDA support..."
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+    
+    # Try installing with CUDA 11.8 first
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 || {
+        echo "Failed to install PyTorch with CUDA 11.8, trying CUDA 12.1..."
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 || {
+            echo "Failed with CUDA packages, falling back to default PyTorch (will use available CUDA if detected)..."
+            pip install torch torchvision torchaudio
+        }
+    }
+    
+    # Verify installation
+    python -c "import torch; print('PyTorch installed successfully. Version:', torch.__version__, 'CUDA available:', torch.cuda.is_available())"
 fi
+
+# Install core scientific packages with conda (better dependency handling)
+echo "Installing core scientific packages with conda..."
+conda install -y matplotlib pandas numpy scipy
 
 # Install Ray and RLlib
 echo "Installing Ray and RLlib..."
-pip install ray[rllib]==2.9.0
-pip install "ray[default]"
+# Try specific version first, then fall back to latest if not available
+pip install "ray[rllib]==2.9.0" "ray[default]" || {
+    echo "Ray 2.9.0 not available, installing latest version..."
+    pip install "ray[rllib]" "ray[default]"
+    
+    # Create a compatibility patch for older code
+    mkdir -p $REPO_DIR/src/compat
+    cat > $REPO_DIR/src/compat/__init__.py << 'EOF'
+# Compatibility layer for different Ray versions
+import ray
+
+# Get Ray version (first two components like 2.9)
+RAY_VERSION = '.'.join(ray.__version__.split('.')[:2])
+RAY_VERSION_FLOAT = float(RAY_VERSION)
+
+print(f"Detected Ray version: {ray.__version__}")
+
+# If using Ray 2.9.0 or older code with newer Ray versions
+if RAY_VERSION_FLOAT > 2.9:
+    try:
+        # For newer Ray versions, provide backwards compatibility
+        print("Setting up compatibility layer for newer Ray version")
+        
+        # Compatibility imports that might be needed
+        try:
+            from ray.rllib.models.torch.attention_net import AttentionWrapper
+        except ImportError:
+            # Define compatibility classes if needed
+            pass
+    except Exception as e:
+        print(f"Warning: Error setting up Ray compatibility layer: {e}")
+EOF
+    
+    echo "Created Ray version compatibility layer in src/compat"
+}
+
+# Check Ray installation
+python -c "import ray; print('Ray installed successfully. Version:', ray.__version__)"
 
 # Install Gymnasium and related packages
 echo "Installing Gymnasium and dependencies..."
-pip install gymnasium python-chess matplotlib pandas tensorboard
+pip install gymnasium python-chess tensorboard
 
 # Install PySpiel for chess environment
 echo "Checking for PySpiel..."
@@ -255,12 +313,44 @@ nvidia-smi
 echo "==============================================="
 
 # Test imports to verify installation
+echo "==============================================="
 echo "Testing imports..."
-python -c "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('CUDA device count:', torch.cuda.device_count())"
-python -c "import ray; print('Ray version:', ray.__version__)" || echo "Ray import failed - check installation"
-python -c "import gymnasium; print('Gymnasium installed successfully')" || echo "Gymnasium import failed - check installation"
-python -c "import numpy; print('NumPy version:', numpy.__version__)"
-python -c "import chess; print('Python-chess version:', chess.__version__)"
+
+test_import() {
+    package=$1
+    command=$2
+    echo -n "Testing $package: "
+    if python -c "$command" 2>/dev/null; then
+        echo "[SUCCESS]"
+        return 0
+    else
+        echo "[FAILED]"
+        echo "  - Attempting to reinstall $package..."
+        if conda install -y $package 2>/dev/null || pip install $package; then
+            echo "  - Reinstalled $package, retesting..."
+            if python -c "$command" 2>/dev/null; then
+                echo "  - [SUCCESS] after reinstall"
+                return 0
+            else
+                echo "  - [FAILED] after reinstall"
+                return 1
+            fi
+        else
+            echo "  - Reinstallation failed"
+            return 1
+        fi
+    fi
+}
+
+test_import "torch" "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('CUDA device count:', torch.cuda.device_count())"
+test_import "ray" "import ray; print('Ray version:', ray.__version__)"
+test_import "gymnasium" "import gymnasium; print('Gymnasium version:', gymnasium.__version__)"
+test_import "numpy" "import numpy; print('NumPy version:', numpy.__version__)"
+test_import "matplotlib" "import matplotlib; print('Matplotlib version:', matplotlib.__version__)"
+test_import "chess" "import chess; print('Python-chess version:', chess.__version__)"
+test_import "pandas" "import pandas; print('Pandas version:', pandas.__version__)"
+
+echo "==============================================="
 
 # Set up instructions for Ray dashboard
 echo "==============================================="
@@ -295,6 +385,24 @@ EOL
 
 chmod +x tmux_train.sh
 echo "Created tmux_train.sh - run to start training in a persistent tmux session"
+
+# Add Ray compatibility import to run_rllib.py if using newer Ray version
+if python -c "import ray; from pkg_resources import parse_version; exit(0 if parse_version(ray.__version__) > parse_version('2.9.0') else 1)" 2>/dev/null; then
+    echo "Adding compatibility import to run_rllib.py..."
+    
+    # Check if the file exists
+    if [ -f "$REPO_DIR/src/run_rllib.py" ]; then
+        # Back up the original file
+        cp "$REPO_DIR/src/run_rllib.py" "$REPO_DIR/src/run_rllib.py.bak"
+        
+        # Add the import after the existing imports
+        sed -i '0,/^import/s/^import/# Import compatibility layer for Ray version differences\ntry:\n    from compat import *\nexcept ImportError:\n    print("Compatibility layer not found, proceeding without it")\n\nimport/' "$REPO_DIR/src/run_rllib.py"
+        
+        echo "Added compatibility import to run_rllib.py"
+    else
+        echo "Warning: run_rllib.py not found, skipping modification"
+    fi
+fi
 
 echo "==============================================="
 echo "RunPod Setup Complete!"

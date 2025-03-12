@@ -710,6 +710,9 @@ def create_rllib_chess_env(config):
 
 def train(args):
     """Main training function using RLlib PPO"""
+    # Import required modules
+    import os
+    
     # Optimize PyTorch memory usage for CUDA
     if args.device == "cuda" and not args.force_cpu:
         # Enable TensorFloat32 for faster computation on Ampere GPUs
@@ -718,7 +721,6 @@ def train(args):
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         # Set memory allocation strategy to reduce fragmentation
-        import os
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         print("🚀 Enabled PyTorch CUDA optimizations")
     
