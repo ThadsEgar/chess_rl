@@ -794,6 +794,7 @@ def train(args):
         "disable_env_checking": True,
         "_enable_rl_module_api": False,
         "_enable_learner_api": False,
+        "enable_rl_module_and_learner": False,
         
         # Resource allocation
         "num_cpus_for_driver": driver_cpus,
@@ -813,7 +814,7 @@ def train(args):
         "train_batch_size": train_batch_size,
         "sgd_minibatch_size": sgd_minibatch_size,
         "num_sgd_iter": 10,
-        "lr": 1e-4,  # Reduced for numerical stability
+        "lr": 5e-5,  # Reduced for numerical stability
         "callbacks": ChessMetricsCallback,
         "create_env_on_driver": False,  # Disable environment on driver to save resources
         "compress_observations": True,
