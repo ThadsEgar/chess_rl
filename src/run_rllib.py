@@ -369,6 +369,12 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             original_exploration = self.random_exploration
             self.random_exploration = False
         
+        # Get the device from the input tensors
+        if isinstance(input_dict.get("obs", {}), dict) and "board" in input_dict["obs"] and hasattr(input_dict["obs"]["board"], "device"):
+            device = input_dict["obs"]["board"].device
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         # Extract observation
         if "obs" in input_dict:
             # Extract relevant observation parts
@@ -392,16 +398,16 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                             action_mask = obs[board_size:]
                     else:
                         # Default board if we can't extract properly
-                        board = torch.zeros((1, 13, 8, 8), device=self.device)
-                        action_mask = torch.ones((1, 20480), device=self.device)
+                        board = torch.zeros((1, 13, 8, 8), device=device)
+                        action_mask = torch.ones((1, 20480), device=device)
                 else:
                     # Default board if we can't extract properly
-                    board = torch.zeros((1, 13, 8, 8), device=self.device)
-                    action_mask = torch.ones((1, 20480), device=self.device)
+                    board = torch.zeros((1, 13, 8, 8), device=device)
+                    action_mask = torch.ones((1, 20480), device=device)
         else:
             # If "obs" not in input_dict, create default values
-            board = torch.zeros((1, 13, 8, 8), device=self.device)
-            action_mask = torch.ones((1, 20480), device=self.device)
+            board = torch.zeros((1, 13, 8, 8), device=device)
+            action_mask = torch.ones((1, 20480), device=device)
             
         # Process through CNN feature extractor
         features = self.features_extractor(board)
@@ -421,7 +427,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             # Ensure mask values are 0 or 1
             if isinstance(action_mask, np.ndarray):
                 # Convert numpy array to torch tensor
-                action_mask_tensor = torch.FloatTensor(action_mask).to(self.device)
+                action_mask_tensor = torch.FloatTensor(action_mask).to(device)
                 inf_mask = torch.clamp(1 - action_mask_tensor, min=0, max=1) * -FLOAT_MAX
             else:
                 # Already a torch tensor
@@ -437,7 +443,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                 batch_size = masked_logits.shape[0]
                 
                 # Generate random numbers to decide which samples get random actions
-                random_samples = torch.rand(batch_size, device=self.device) < self.current_epsilon
+                random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
                 
                 # For samples selected for random exploration
                 for i in range(batch_size):
@@ -448,7 +454,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                         # Only proceed if there are legal actions
                         if len(legal_actions) > 0:
                             # Choose a random legal action
-                            random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,))].item()
+                            random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,), device=device)].item()
                             
                             # Set logits to favor this random action
                             masked_logits[i] = torch.full_like(masked_logits[i], -10.0)
