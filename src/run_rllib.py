@@ -853,7 +853,7 @@ def train(args):
         "preprocessor_pref": None,
         "_disable_preprocessor_api": True,
         "observation_filter": "NoFilter",
-        "compress_observations": True,
+        "compress_observations": False,
         
         # Training parameters
         "train_batch_size": int(train_batch_size),  # Ensure integer
