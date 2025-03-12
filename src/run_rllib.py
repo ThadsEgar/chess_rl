@@ -858,7 +858,7 @@ def train(args):
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
         "num_cpus_per_env_runner": cpus_per_worker,
-        "num_gpus": 1.0,                           # Driver only needs 1 GPU
+        "num_gpus": 0.0,                           # Driver doesn't need a dedicated GPU
         "num_gpus_per_env_runner": 0.0,            # Workers don't need GPUs with learner API
         "num_envs_per_env_runner": num_envs,
         
@@ -921,18 +921,19 @@ def train(args):
 
     # Modify config to use learner API properly with all GPUs
     # Reassign GPU resources - crucial for fixing utilization
-    config["num_gpus"] = 1.0                           # Driver only needs 1 GPU
+    config["num_gpus"] = 0.0                           # Driver doesn't need a dedicated GPU
     config["num_gpus_per_env_runner"] = 0.0            # Workers don't need GPUs with learner API
-    config["num_learners"] = 5                         # Use 5 dedicated learner processes (1 per GPU)
+    config["num_learners"] = 4                         # Use 4 dedicated learners (matching your GPU count)
     config["num_gpus_per_learner"] = 1.0               # Each learner gets 1 full GPU
-    config["num_aggregator_actors_per_learner"] = 2    # Optimize data flow to learners
+    config["learner_gpu_ids"] = [0, 1, 2, 3]           # Explicitly assign GPUs to learners
+    config["torch_compile_learner"] = True             # Optimize torch operations with torch.compile
     
     # Optional but helpful performance improvements
     config["simple_optimizer"] = True                  # Better memory utilization
     config["num_sgd_iter"] = 3                         # Reduce iteration count for faster training
     
     print("\n===== Multi-GPU Learner Configuration =====")
-    print(f"Redistributed GPUs: 1 (driver) + 5 (learners, 1.0 each)")
+    print(f"Redistributed GPUs: 1 (driver) + 4 (learners, 1.0 each)")
     print(f"Workers will focus on data collection without GPU allocation")
     print("===========================================\n")
     
