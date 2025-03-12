@@ -30,8 +30,12 @@ torch, nn = try_import_torch()
 class ChessMetricsCallback(DefaultCallbacks):
     """Callback to track chess-specific metrics during training"""
     
-    def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+    def on_episode_end(self, *, worker=None, base_env=None, policies=None, episode=None, env_index=None, **kwargs):
         """Called at the end of an episode"""
+        # Skip if episode is None (can happen in some edge cases)
+        if episode is None:
+            return
+            
         # Extract game outcome from info
         info = episode.last_info_for()
         if info and "outcome" in info:
