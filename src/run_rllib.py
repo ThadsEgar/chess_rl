@@ -855,7 +855,7 @@ def train(args):
         "num_workers": int(num_workers),  # Ensure integer
         "num_cpus_per_env_runner": int(cpus_per_worker),  # Ensure integer
         "num_gpus": float(int(driver_gpus)) if driver_gpus == int(driver_gpus) else round(driver_gpus, 4),  # Clean float
-        "num_gpus_per_env_runner": round(gpus_per_worker, 4),  # Round to 6 decimal places
+        "num_gpus_per_env_runner": round(gpus_per_worker -0.001, 4),  # Round to 6 decimal places
         "num_envs_per_env_runner": int(num_envs),  # Ensure integer
         
         # Model configuration
