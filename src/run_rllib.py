@@ -852,7 +852,7 @@ def train(args):
         "disable_env_checking": True,
         "_enable_rl_module_api": True,
         "_enable_learner_api": True,
-        "enable_rl_module_and_learner": False,
+        "enable_rl_module_and_learner": True,
         
         # Resource allocation - use whole numbers as requested
         "num_cpus_for_driver": driver_cpus,
