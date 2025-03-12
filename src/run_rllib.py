@@ -223,6 +223,15 @@ class ChessMetricsCallback(DefaultCallbacks):
                 custom_metrics = env_runners["custom_metrics"]
             episodes_this_iter = env_runners.get("episodes_this_iter", episodes_this_iter)
         
+        # Check for learner metrics (when using learner API)
+        if "learner" in result and not custom_metrics:
+            learner = result["learner"]
+            if "custom_metrics" in learner:
+                custom_metrics = learner["custom_metrics"]
+            # Learner might also have episodes data
+            if "episodes_this_iter" in learner:
+                episodes_this_iter = learner.get("episodes_this_iter", episodes_this_iter)
+        
         # If nothing found, check the top-level custom_metrics
         if not custom_metrics and "custom_metrics" in result:
             custom_metrics = result["custom_metrics"]
@@ -894,6 +903,9 @@ def train(args):
         "vf_loss_coeff": 1.0,  # Balance policy and value function losses
         "postprocess_inputs": True,  # Allow our callback to process trajectories
         "normalize_actions": False,  # Chess actions are discrete and masked
+        
+        # Ensure metrics are reported properly with learner API
+        "report_env_runner_metrics": True,
         
         # Entropy settings to encourage exploration
         "entropy_coeff": args.entropy_coeff,  # Add entropy bonus for exploration
