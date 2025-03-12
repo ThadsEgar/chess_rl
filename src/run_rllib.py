@@ -177,7 +177,7 @@ class ChessMaskedRLModule(TorchRLModule):
             # Create a default batch size of 1 if batch is not a tensor with shape
             batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
             board = torch.zeros((batch_size, 13, 8, 8), device=device)
-            action_mask = torch.ones((batch_size, 20480), device=device)
+            action_mask = torch.zeros((batch_size, 20480), device=device)
         
         # Process through CNN feature extractor
         features = self.features_extractor(board)
@@ -220,7 +220,7 @@ class ChessMaskedRLModule(TorchRLModule):
             # Create a default batch size of 1 if batch is not a tensor with shape
             batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
             board = torch.zeros((batch_size, 13, 8, 8), device=device)
-            action_mask = torch.ones((batch_size, 20480), device=device)
+            action_mask = torch.zeros((batch_size, 20480), device=device)
         
         # Get device from the input tensors
         device = board.device
