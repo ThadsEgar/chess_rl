@@ -837,16 +837,23 @@ def train(args):
         # Resource allocation - use whole numbers as requested
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
-        "num_cpus_per_env_runner": cpus_per_worker,
+        "num_cpus_per_worker": cpus_per_worker,
         "num_gpus": driver_gpus,
-        "num_gpus_per_env_runner": gpus_per_worker,
-        "num_envs_per_env_runner": num_envs,
+        "num_gpus_per_worker": gpus_per_worker,
+        "num_envs_per_worker": num_envs,
         
         # Model configuration
         "model": {
             "custom_model": "chess_masked_model",
-            "custom_model_config": {"handle_missing_action_mask": True}
+            "custom_model_config": {"handle_missing_action_mask": True},
+            "no_final_linear": True  # Prevent RLlib from adding extra layers
         },
+        
+        # Disable preprocessors that are causing the dimension mismatch
+        "preprocessor_pref": None,
+        "_disable_preprocessor_api": True,
+        "observation_filter": "NoFilter",
+        "compress_observations": False,
         
         # Training parameters
         "train_batch_size": int(train_batch_size),  # Ensure integer
@@ -855,7 +862,6 @@ def train(args):
         "lr": 5e-5,  # Reduced for numerical stability
         "callbacks": ChessMetricsCallback,
         "create_env_on_driver": False,  # Disable environment on driver to save resources
-        "compress_observations": True,
         "log_level": "INFO",
         
         # Gradient clipping to prevent NaN issues
@@ -863,7 +869,9 @@ def train(args):
         
         # Training Optimization - use GPU-optimized experience batches
         "batch_mode": "truncate_episodes",  # Process data in fixed-size chunks for better GPU utilization
-        "preprocessor_pref": None,  # Skip preprocessing for performance
+        "rollout_fragment_length": "auto",  # Increased for better GPU utilization with more CPUs
+        "_use_trajectory_view_api": True,
+        "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
         
         # Zero-sum game specific settings
         "gamma": 1.0,  # No temporal discounting for chess (outcome only matters at end)
@@ -881,12 +889,6 @@ def train(args):
             [args.max_iterations * 0.5, args.entropy_coeff * 0.5],  # Halfway through, halve the coefficient
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
-        
-        # Memory optimization for efficient GPU memory usage
-        "_disable_preprocessor_api": False,
-        "rollout_fragment_length": "auto",  # Increased for better GPU utilization with more CPUs
-        "_use_trajectory_view_api": True,
-        "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
     }
 
     # Set up checkpoint restoration if provided
