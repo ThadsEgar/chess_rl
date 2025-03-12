@@ -281,6 +281,13 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
         
+        # Print observation space details for debugging
+        print(f"Initializing ChessMaskedModel with observation space: {obs_space}")
+        if isinstance(obs_space, gym.spaces.Dict):
+            print(f"Dict keys: {obs_space.spaces.keys()}")
+            for key, space in obs_space.spaces.items():
+                print(f"  {key}: {space}")
+        
         # Handle both Dict observation spaces and non-Dict spaces
         if isinstance(obs_space, gym.spaces.Dict):
             # Get feature dimensions from observation space
@@ -673,7 +680,7 @@ def create_rllib_chess_env(config):
                 # Define action and observation spaces
                 self.action_space = spaces.Discrete(20480)  # Same as ChessEnv
                 
-                # Define observation space with same structure as ChessEnv
+                # Define observation space with same structure as ChessEnv and DictObsWrapper
                 self.observation_space = spaces.Dict({
                     'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
                     'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space.n,), dtype=np.float32),
@@ -724,6 +731,14 @@ def train(args):
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         print("🚀 Enabled PyTorch CUDA optimizations")
     
+    # Detect available CPUs and GPUs
+    import multiprocessing
+    import torch
+    detected_cpus = min(128, multiprocessing.cpu_count())  # Cap at 128 for large systems
+    detected_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    
+    print(f"System hardware detected: {detected_cpus} CPUs, {detected_gpus} GPUs")
+    
     # Initialize Ray
     if args.redis_password:
         ray.init(
@@ -731,47 +746,72 @@ def train(args):
             ignore_reinit_error=True, 
             include_dashboard=args.dashboard,
             _redis_password=args.redis_password,
-            num_cpus=128,
+            num_cpus=detected_cpus,
+            num_gpus=detected_gpus,
         )
     else:
         ray.init(
             address="auto" if args.distributed else None,
             ignore_reinit_error=True,
             include_dashboard=args.dashboard,
-            num_cpus=128,
+            num_cpus=detected_cpus,
+            num_gpus=detected_gpus,
         )
     
-    # Hardware detection - optimize for 6x RTX 3090, 85 vCPUs, 124GB RAM
-    import multiprocessing
-    
-    # Hardware configuration for 6x RTX 3090
+    # Hardware configuration for 6x RTX 3090, 85 vCPUs, 124GB RAM
     print("\n===== Hardware Configuration =====")
-    print("Optimizing for 6 GPUs and 128 CPU cores")
+    print(f"Ray runtime resources: {ray.available_resources()}")
+    target_gpus = 6  # Target for 6 RTX 3090s
+    actual_gpus = min(target_gpus, int(ray.available_resources().get("GPU", 0)))
+    target_cpus = 128  # Target for 128 CPU cores
+    actual_cpus = min(target_cpus, int(ray.available_resources().get("CPU", 0)))
+    
+    print(f"Optimizing for {actual_gpus} GPUs and {actual_cpus} CPU cores")
     print("Using 3.0/3.0 split between driver and workers for optimal large-batch training")
-    total_gpus = 6
-    total_cpus = 128
     
     # Resource allocation - adjusted for 3.0/3.0 GPU split
-    driver_cpus = 24  # Increased from 10 to utilize additional CPU cores
-    num_workers = 24  # Increased from 16 to utilize additional CPU cores
-    cpus_per_worker = 4  # Increased from 4 for better processing
-    num_envs = 8  # Increased environments per worker for better parallelism
+    driver_cpus = max(4, actual_cpus // 5)  # Allocate ~20% for driver
+    num_workers = max(4, actual_cpus // 5)  # Allocate workers based on available CPUs
+    cpus_per_worker = max(1, (actual_cpus - driver_cpus) // num_workers)
+    num_envs = 8  # Environments per worker
     
-    # GPU allocation - 3.0/3.0 split as requested
-    driver_gpus = 3.0  # 3 GPUs for driver to handle large batch SGD updates
-    worker_gpus = 3.0  # 3 GPUs distributed across workers
-    gpus_per_worker = worker_gpus / num_workers  # ~0.15 GPU per worker
+    # GPU allocation - 3.0/3.0 split as requested (if available)
+    if actual_gpus >= 6:
+        driver_gpus = 3.0
+        worker_gpus = 3.0
+    else:
+        # Fallback for fewer GPUs
+        driver_gpus = actual_gpus / 2.0
+        worker_gpus = actual_gpus / 2.0
     
-    # Batch sizes optimized for 3.0 driver GPUs
-    train_batch_size = 262144  # 256K
-    sgd_minibatch_size = 16384  # 16K
+    gpus_per_worker = worker_gpus / num_workers if num_workers > 0 else 0
+    
+    # Batch sizes based on available resources
+    train_batch_size = 262144 if actual_gpus >= 3 else 131072  # Scale down for fewer GPUs
+    sgd_minibatch_size = 16384 if actual_gpus >= 3 else 8192
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
-    print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request} of {total_cpus} available")
-    print(f"GPU allocation: {driver_gpus} (driver) + {worker_gpus} (workers) = {total_gpus} total")
+    print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request} of {actual_cpus} available")
+    print(f"GPU allocation: {driver_gpus} (driver) + {worker_gpus} (workers) = {actual_gpus} total")
     print(f"GPU per worker: {gpus_per_worker:.4f}")
     print(f"Batch size: {train_batch_size} (train) / {sgd_minibatch_size} (SGD)")
     print("==================================\n")
+    
+    # Test environment creation to diagnose observation space issues
+    print("\n===== Environment Test =====")
+    env = create_rllib_chess_env({})
+    print(f"Environment observation space: {env.observation_space}")
+    print(f"Environment action space: {env.action_space}")
+    obs, _ = env.reset()
+    print(f"Observation structure: {type(obs)}")
+    if isinstance(obs, dict):
+        print(f"Observation keys: {obs.keys()}")
+        for key, value in obs.items():
+            if hasattr(value, 'shape'):
+                print(f"  {key}: {type(value)} with shape {value.shape}")
+            else:
+                print(f"  {key}: {type(value)} with value {value}")
+    print("============================\n")
     
     # Register the custom model and environment
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
