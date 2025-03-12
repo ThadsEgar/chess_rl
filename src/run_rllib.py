@@ -284,6 +284,277 @@ class ChessMetricsCallback(DefaultCallbacks):
             torch.cuda.empty_cache()  # Clear GPU memory cache
 
 
+# Import RLModule for the new API stack
+from ray.rllib.core.models.torch.torch_rl_module import TorchRLModule
+from ray.rllib.core.rl_module.rl_module import RLModuleConfig
+from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.torch_utils import FLOAT_MAX
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
+
+# Import custom environment
+from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
+
+torch, nn = try_import_torch()
+
+# Define a custom callback to track chess game statistics
+class ChessMetricsCallback(DefaultCallbacks):
+    """Callback to track chess-specific metrics during training."""
+    
+    def __init__(self):
+        super().__init__()
+        # Import numpy for array operations 
+        import numpy as np
+        self.np = np
+        
+        self.win_rates = {"white": [], "black": [], "draw": []}
+        self.num_episodes = 0
+        self.total_rewards = []
+        self.episode_lengths = []
+        self.is_white_to_move = {}  # Track which color is to move for each episode
+    
+    def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        # Initialize tracking for which player is to move in this episode
+        episode_id = episode.episode_id
+        self.is_white_to_move[episode_id] = True  # Start with White to move
+    
+    def on_episode_step(self, *, worker, base_env, episode, env_index, **kwargs):
+        # Track player turns - flip after each action
+        episode_id = episode.episode_id
+        if episode_id in self.is_white_to_move:
+            self.is_white_to_move[episode_id] = not self.is_white_to_move[episode_id]
+    
+    def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        # Get the final outcome (from White's perspective)
+        last_info = episode.last_info_for(env_index)
+        
+        # Handle the case where last_info is None (which can happen with some environment errors)
+        if last_info is None:
+            print(f"Warning: last_info is None for episode {episode.episode_id}, env_index {env_index}")
+            # Try to get some info from the episode
+            outcome = "unknown"
+            
+            # See if we can get termination info from the episode length
+            if episode.length >= 400:  # Check if we reached move limit
+                print(f"   Episode reached max length ({episode.length}), likely terminated due to move limit")
+                outcome = "draw"  # Assume draw if we reach the move limit
+                
+            # Try to infer outcome from reward (since rewards are only given at the end)
+            elif abs(episode.total_reward) > 0.9:  # If we got a substantial reward
+                if episode.total_reward > 0:
+                    outcome = "white_win"
+                    print(f"   Inferred white win from positive reward: {episode.total_reward}")
+                else:
+                    outcome = "black_win"
+                    print(f"   Inferred black win from negative reward: {episode.total_reward}")
+        else:
+            # Extract outcome from info, defaulting to "unknown" if not present
+            outcome = last_info.get("outcome", "unknown")
+            
+            # If outcome is still unknown, try other fields
+            if outcome == "unknown" and "game_outcome" in last_info:
+                outcome = last_info.get("game_outcome")
+            
+            # If still unknown but we know it's a draw, set to draw
+            if outcome == "unknown" and last_info.get("draw", False):
+                outcome = "draw"
+        
+        # Print diagnostic info for debugging
+        if outcome == "unknown":
+            print(f"Unknown outcome for episode {episode.episode_id}, length: {episode.length}, reward: {episode.total_reward}")
+            if last_info is not None:
+                print(f"   Available info keys: {list(last_info.keys())}")
+        
+        episode_id = episode.episode_id
+        
+        # Update local counters
+        white_win = 0
+        black_win = 0
+        draw = 0
+        game_completed = 1  # By default, consider every episode as completed
+        
+        # Set the appropriate counter based on outcome
+        if outcome == "white_win":
+            white_win = 1
+            self.win_rates["white"].append(1)
+            self.win_rates["black"].append(0)
+            self.win_rates["draw"].append(0)
+        elif outcome == "black_win":
+            black_win = 1
+            self.win_rates["white"].append(0)
+            self.win_rates["black"].append(1)
+            self.win_rates["draw"].append(0)
+        elif outcome == "draw":
+            draw = 1
+            self.win_rates["white"].append(0)
+            self.win_rates["black"].append(0)
+            self.win_rates["draw"].append(1)
+        else:
+            # Unknown outcome
+            self.win_rates["white"].append(0)
+            self.win_rates["black"].append(0)
+            self.win_rates["draw"].append(0)
+            
+        # IMPORTANT: Register metrics with RLlib's reporting system
+        episode.custom_metrics["white_win"] = white_win
+        episode.custom_metrics["black_win"] = black_win
+        episode.custom_metrics["draw"] = draw
+        episode.custom_metrics["game_completed"] = game_completed
+        episode.custom_metrics["game_length"] = episode.length
+            
+        # Clean up tracking
+        if episode_id in self.is_white_to_move:
+            del self.is_white_to_move[episode_id]
+            
+        # Record other episode stats
+        self.num_episodes += 1
+        self.total_rewards.append(episode.total_reward)
+        self.episode_lengths.append(episode.length)
+
+    def on_postprocess_trajectory(self, *, worker, episode, agent_id, policy_id, policies, postprocessed_batch, original_batches, **kwargs):
+        """Critical method for correct advantage calculation in zero-sum chess games.
+        
+        This ensures value targets are properly flipped based on which player (White or Black) is to move.
+        """
+        # Get trajectory data
+        dones = postprocessed_batch["dones"]
+        obs = postprocessed_batch["obs"]
+        rewards = postprocessed_batch["rewards"]
+        
+        # Extract turn information from observations
+        is_white_turn = []
+        for observation in obs:
+            # Use the white_to_move field we added to the observation
+            if isinstance(observation, dict) and "white_to_move" in observation:
+                # Convert to boolean (0=False, 1=True)
+                is_white_turn.append(bool(observation["white_to_move"]))
+            else:
+                # Fallback to alternating turns if field not available
+                is_white_turn.append(len(is_white_turn) % 2 == 0)
+        
+        # Convert is_white_turn to numpy array
+        is_white_turn = self.np.array(is_white_turn)
+        
+        # Find the final outcome (z) - the reward at terminal state
+        # In chess, rewards are sparse and only given at the end of the game
+        terminal_reward = None
+        if any(dones):
+            # Find the first done step
+            for i, done in enumerate(dones):
+                if done:
+                    terminal_reward = rewards[i]  # This is the final reward from White's perspective
+                    break
+        
+        # If no terminal reward in this batch, we can't properly set value targets
+        if terminal_reward is None:
+            # Skip processing if there's no terminal state
+            return postprocessed_batch
+        
+        # Calculate value targets for each state in the trajectory
+        # Convert to numpy array to match RLlib's expected format
+        value_targets = self.np.zeros_like(rewards)
+        
+        for i, white_turn in enumerate(is_white_turn):
+            # Apply correct zero-sum value target:
+            # White's turn: value target = terminal_reward (outcome from White's perspective)
+            # Black's turn: value target = -terminal_reward (outcome from Black's perspective)
+            if white_turn:
+                value_targets[i] = terminal_reward  # White's perspective
+            else:
+                value_targets[i] = -terminal_reward  # Black's perspective flipped
+        
+        # Update batch with corrected value targets
+        if "value_targets" in postprocessed_batch:
+            postprocessed_batch["value_targets"] = value_targets
+        
+        return postprocessed_batch
+
+    def on_train_result(self, *, algorithm, result, **kwargs):
+        """Called after each training iteration, to log chess statistics"""
+        import gc
+        
+        # Helper to find metrics recursively in the result structure
+        def find_metrics_recursively(data, prefix=""):
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k in ["white_win_mean", "black_win_mean", "draw_mean", "game_completed_mean"]:
+                        return True
+                    if isinstance(v, (dict, list)):
+                        if find_metrics_recursively(v, prefix=f"{prefix}.{k}" if prefix else k):
+                            return True
+            return False
+        
+        # Check for metrics in different possible locations (RLlib structure changed in versions)
+        custom_metrics = {}
+        episodes_this_iter = result.get("episodes_this_iter", 0)
+        
+        # Try the env_runners structure (newer RLlib versions)
+        if "env_runners" in result:
+            env_runners = result["env_runners"]
+            if "custom_metrics" in env_runners:
+                custom_metrics = env_runners["custom_metrics"]
+            episodes_this_iter = env_runners.get("episodes_this_iter", episodes_this_iter)
+        
+        # Check for learner metrics (when using learner API)
+        if "learner" in result and not custom_metrics:
+            learner = result["learner"]
+            if "custom_metrics" in learner:
+                custom_metrics = learner["custom_metrics"]
+            # Learner might also have episodes data
+            if "episodes_this_iter" in learner:
+                episodes_this_iter = learner.get("episodes_this_iter", episodes_this_iter)
+        
+        # If nothing found, check the top-level custom_metrics
+        if not custom_metrics and "custom_metrics" in result:
+            custom_metrics = result["custom_metrics"]
+        
+        # Extract metrics for the current iteration
+        white_wins = custom_metrics.get("white_win_mean", 0) * episodes_this_iter
+        black_wins = custom_metrics.get("black_win_mean", 0) * episodes_this_iter
+        draws = custom_metrics.get("draw_mean", 0) * episodes_this_iter
+        completed = custom_metrics.get("game_completed_mean", 0) * episodes_this_iter
+        
+        # Add to total wins
+        if not hasattr(algorithm, "total_white_wins"):
+            algorithm.total_white_wins = 0
+            algorithm.total_black_wins = 0
+            algorithm.total_draws = 0
+            algorithm.total_completed_games = 0
+            algorithm.total_episodes = 0
+        
+        algorithm.total_white_wins += int(white_wins)
+        algorithm.total_black_wins += int(black_wins)
+        algorithm.total_draws += int(draws)
+        algorithm.total_completed_games += int(completed)
+        algorithm.total_episodes += episodes_this_iter
+        
+        # Print a summary
+        print("\n----- Chess Stats -----")
+        print(f"White Wins: {algorithm.total_white_wins}")
+        print(f"Black Wins: {algorithm.total_black_wins}")
+        print(f"Draws:      {algorithm.total_draws}")
+        print(f"Total Completed Games: {algorithm.total_completed_games}")
+        
+        # Calculate win percentages (if any games have been completed)
+        if algorithm.total_completed_games > 0:
+            white_win_pct = algorithm.total_white_wins / algorithm.total_completed_games * 100
+            black_win_pct = algorithm.total_black_wins / algorithm.total_completed_games * 100
+            draw_pct = algorithm.total_draws / algorithm.total_completed_games * 100
+            print(f"Win %: White={white_win_pct:.1f}%, Black={black_win_pct:.1f}%, Draw={draw_pct:.1f}%")
+        
+        # Calculate completion rate
+        if algorithm.total_episodes > 0:
+            completion_rate = algorithm.total_completed_games / algorithm.total_episodes * 100
+            print(f"Completion Rate: {completion_rate:.1f}%")
+        print("----------------------\n")
+        
+        # Explicitly run garbage collection to recover memory
+        gc.collect()
+        
+        # Clear any large temporary variables that might be held
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear GPU memory cache
+
+
 class ChessMaskedModel(TorchModelV2, nn.Module):
     """Custom model for Chess that supports action masking"""
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
@@ -308,7 +579,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             print(f"WARNING: Expected Dict observation space but got {type(obs_space)}. Assuming standard dimensions.")
             # Assume standard chess board dimensions: 13 channels for pieces, 8x8 board
             self.board_shape = (13, 8, 8)
-            self.action_mask_shape = (20480,)  # Standard action mask size
+            self.action_mask_shape = (action_space.n,)  # Standard action mask size
             
         self.board_channels = self.board_shape[0]  # 13 channels (6 piece types x 2 colors + empty)
         self.board_size = self.board_shape[1]  # 8x8 board
@@ -501,6 +772,222 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
     def value_function(self):
         """Return the current value function estimate for the last processed batch."""
         return self._value.squeeze(1)
+
+
+class ChessMaskedRLModule(TorchRLModule):
+    """Custom RLModule for Chess that supports action masking - compatible with the new RLlib API stack"""
+    
+    def __init__(self, config: RLModuleConfig):
+        super().__init__(config)
+        
+        # Get spaces from config
+        obs_space = config.observation_space
+        action_space = config.action_space
+        
+        # Print observation space details for debugging
+        print(f"Initializing ChessMaskedRLModule with observation space: {obs_space}")
+        if isinstance(obs_space, gym.spaces.Dict):
+            print(f"Dict keys: {obs_space.spaces.keys()}")
+            for key, space in obs_space.spaces.items():
+                print(f"  {key}: {space}")
+        
+        # Handle both Dict observation spaces and non-Dict spaces
+        if isinstance(obs_space, gym.spaces.Dict):
+            # Get feature dimensions from observation space
+            self.board_shape = obs_space["board"].shape
+            self.action_mask_shape = obs_space["action_mask"].shape
+        else:
+            # If we don't have a Dict space, assume it's a Box with the expected board dimensions
+            # Log a warning but continue instead of raising an error
+            print(f"WARNING: Expected Dict observation space but got {type(obs_space)}. Assuming standard dimensions.")
+            # Assume standard chess board dimensions: 13 channels for pieces, 8x8 board
+            self.board_shape = (13, 8, 8)
+            self.action_mask_shape = (action_space.n,)  # Standard action mask size
+            
+        self.board_channels = self.board_shape[0]  # 13 channels (6 piece types x 2 colors + empty)
+        self.board_size = self.board_shape[1]  # 8x8 board
+        
+        # Feature extractor CNN
+        self.features_extractor = nn.Sequential(
+            nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, 832),
+            nn.ReLU(),
+        )
+        
+        # Policy and value heads
+        self.policy_head = nn.Linear(832, action_space.n)
+        self.value_head = nn.Linear(832, 1)
+        
+        # Epsilon-greedy exploration parameters
+        self.initial_epsilon = 0.1  # 10% random action probability
+        self.final_epsilon = 0.02   # 2% random action probability
+        self.epsilon_timesteps = 1_000_000  # Decay over 1M timesteps
+        self.current_epsilon = self.initial_epsilon
+        self.random_exploration = True  # Set to False to disable exploration
+        self.timesteps = 0  # Track timesteps for epsilon decay
+        
+        # Check if we're in evaluation mode from model config
+        model_config_dict = config.module_config if hasattr(config, "module_config") else {}
+        if model_config_dict.get("evaluation_mode", False):
+            self.random_exploration = False
+            print("Model initialized in evaluation mode, exploration disabled")
+        else:
+            print(f"Initialized epsilon-greedy exploration with initial_epsilon={self.initial_epsilon}, final_epsilon={self.final_epsilon}")
+    
+    def set_evaluation_mode(self, evaluation_mode=True):
+        """Explicitly set whether this model is in evaluation mode (disables exploration)"""
+        previous_mode = not self.random_exploration
+        if evaluation_mode:
+            self.random_exploration = False
+            print("Model set to evaluation mode, exploration disabled")
+        else:
+            self.random_exploration = True
+            print("Model set to training mode, exploration enabled")
+        return previous_mode
+    
+    def update_epsilon(self, num_steps=None):
+        """Update exploration epsilon based on timesteps or the provided step count"""
+        if num_steps is not None:
+            self.timesteps = num_steps
+        else:
+            self.timesteps += 1
+            
+        # Linear decay from initial_epsilon to final_epsilon over epsilon_timesteps
+        if self.timesteps < self.epsilon_timesteps:
+            self.current_epsilon = self.initial_epsilon - (self.initial_epsilon - self.final_epsilon) * (self.timesteps / self.epsilon_timesteps)
+        else:
+            self.current_epsilon = self.final_epsilon
+            
+        return self.current_epsilon
+    
+    def _forward_inference(self, batch):
+        """Forward pass for inference (no exploration)"""
+        # Extract tensor components
+        if isinstance(batch, dict) and "board" in batch:
+            board = batch["board"]
+            action_mask = batch["action_mask"]
+        else:
+            # Handle non-dict inputs (should be rare with the wrapper)
+            device = next(self.parameters()).device
+            board = torch.zeros((batch.shape[0], 13, 8, 8), device=device)
+            action_mask = torch.ones((batch.shape[0], 20480), device=device)
+            
+        # Process through CNN feature extractor
+        features = self.features_extractor(board)
+        
+        # Add small epsilon to features to avoid NaN issues
+        features = features + 1e-8
+        
+        # Get raw action outputs (logits)
+        action_logits = self.policy_head(features)
+        
+        # Apply action mask by setting illegal actions to a large negative number
+        if action_mask is not None:
+            # Ensure action_mask is properly shaped for broadcasting
+            if len(action_mask.shape) == 1:
+                action_mask = action_mask.unsqueeze(0)
+                
+            # Apply the mask to the logits
+            inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
+            masked_logits = action_logits + inf_mask
+            
+            # Apply gradient clipping to logits
+            masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
+            
+            return {"action_dist": masked_logits}
+        
+        # If no action mask available, return unmasked logits (with clipping)
+        action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
+            
+        return {"action_dist": action_logits}
+    
+    def _forward_exploration(self, batch, **kwargs):
+        """Forward pass with exploration possibilities"""
+        # Extract tensor components
+        if isinstance(batch, dict) and "board" in batch:
+            board = batch["board"]
+            action_mask = batch["action_mask"]
+        else:
+            # Handle non-dict inputs (should be rare with the wrapper)
+            device = next(self.parameters()).device
+            board = torch.zeros((batch.shape[0], 13, 8, 8), device=device)
+            action_mask = torch.ones((batch.shape[0], 20480), device=device)
+        
+        # Get device from the input tensors
+        device = board.device
+            
+        # Process through CNN feature extractor
+        features = self.features_extractor(board)
+        
+        # Add small epsilon to features to avoid NaN issues
+        features = features + 1e-8
+        
+        # Get raw action outputs (logits)
+        action_logits = self.policy_head(features)
+        
+        # Get value estimate
+        value = self.value_head(features)
+        
+        # Apply action mask by setting illegal actions to a large negative number
+        if action_mask is not None:
+            # Ensure action_mask is properly shaped for broadcasting
+            if len(action_mask.shape) == 1:
+                action_mask = action_mask.unsqueeze(0)
+                
+            # Apply the mask to the logits
+            inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
+            masked_logits = action_logits + inf_mask
+            
+            # Simple epsilon-greedy exploration - only apply during training
+            if self.random_exploration:
+                # Decay epsilon over time
+                self.update_epsilon()
+                batch_size = masked_logits.shape[0]
+                
+                # Generate random numbers to decide which samples get random actions
+                random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
+                
+                # For samples selected for random exploration
+                for i in range(batch_size):
+                    if random_samples[i]:
+                        # Find legal actions (mask value == 1 or equivalently, where inf_mask == 0)
+                        legal_actions = torch.where(action_mask[i] > 0)[0]
+                        
+                        # Only proceed if there are legal actions
+                        if len(legal_actions) > 0:
+                            # Choose a random legal action
+                            random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,), device=device)].item()
+                            
+                            # Use smaller values for more numerical stability (5.0 instead of 10.0)
+                            masked_logits[i] = torch.full_like(masked_logits[i], -5.0)
+                            masked_logits[i, random_action_idx] = 5.0
+            
+            # Apply gradient clipping to logits
+            masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
+                
+            return {"action_dist": masked_logits, "vf": value}
+        
+        # If no action mask available, return unmasked logits (with clipping)
+        action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
+            
+        return {"action_dist": action_logits, "vf": value}
+    
+    def forward(self, batch, **kwargs):
+        """Forward method for both training and inference"""
+        # Check if we're in inference mode
+        deterministic = kwargs.get("deterministic", False)
+        
+        if deterministic:
+            return self._forward_inference(batch)
+        else:
+            return self._forward_exploration(batch, **kwargs)
 
 
 def create_rllib_chess_env(config):
@@ -818,9 +1305,10 @@ def train(args):
                 print(f"  {key}: {type(value)} with value {value}")
     print("============================\n")
     
-    # Register the custom model and environment
+    # Register environment and model same as in training
     ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
     tune.register_env("chess_env", create_rllib_chess_env)
+
     
     # Create an absolute path for checkpoint directory
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
@@ -862,11 +1350,18 @@ def train(args):
         "num_gpus_per_env_runner": 0.0,            # Workers don't need GPUs with learner API
         "num_envs_per_env_runner": num_envs,
         
+        # Configure learners for optimal GPU utilization
+        "num_learners": 4,                         # Use 4 learner processes (one per GPU)
+        "num_gpus_per_learner": 1.0,               # Allocate 1 full GPU to each learner
+        "torch_compile_learner": True,             # Use torch.compile() for better performance
+        
         # Model configuration
-        "model": {
-            "custom_model": "chess_masked_model",
-            "custom_model_config": {"handle_missing_action_mask": True},
-            "no_final_linear": True  # Prevent RLlib from adding extra layers
+        "module": {
+            "_target_": ChessMaskedRLModule,
+            "module_config": {
+                "handle_missing_action_mask": True,
+                "no_final_linear": True  # Prevent RLlib from adding extra layers
+            }
         },
         
         # Disable preprocessors that are causing the dimension mismatch
@@ -919,21 +1414,13 @@ def train(args):
         "simple_optimizer": True,                  # Better memory utilization
     }
 
-    # Modify config to use learner API properly with all GPUs
-    # Reassign GPU resources - crucial for fixing utilization
-    config["num_gpus"] = 0.0                           # Driver doesn't need a dedicated GPU
-    config["num_gpus_per_env_runner"] = 0.0            # Workers don't need GPUs with learner API
-    config["num_learners"] = 4                         # Use 4 dedicated learners (matching your GPU count)
-    config["num_gpus_per_learner"] = 1.0               # Each learner gets 1 full GPU
-    config["torch_compile_learner"] = True             # Optimize torch operations with torch.compile
-    
     # Optional but helpful performance improvements
     config["simple_optimizer"] = True                  # Better memory utilization
     config["num_sgd_iter"] = 3                         # Reduce iteration count for faster training
     
     print("\n===== Multi-GPU Learner Configuration =====")
-    print(f"Redistributed GPUs: 1 (driver) + 4 (learners, 1.0 each)")
-    print(f"Workers will focus on data collection without GPU allocation")
+    print(f"GPU allocation: 4 learners with 1.0 GPU each")
+    print(f"Workers focus on data collection without GPU allocation")
     print("===========================================\n")
     
     analysis = tune.run(
@@ -981,10 +1468,10 @@ def evaluate(args):
         "framework": "torch",
         "num_workers": 0,  # Single worker for evaluation
         "num_gpus": 1 if args.device == "cuda" else 0,  # Use exact integers for GPU allocation
-        "model": {
-            "custom_model": "chess_masked_model",
-            "custom_model_config": {
-                "handle_missing_action_mask": True,
+        # Use RLModule API instead of custom_model
+        "module": {
+            "_target_": ChessMaskedRLModule,
+            "module_config": {
                 "evaluation_mode": True  # Explicitly use evaluation mode (disables exploration)
             }
         },
