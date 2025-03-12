@@ -17,6 +17,7 @@ from ray import tune
 from ray.rllib.algorithms.ppo import PPO
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.models import ModelCatalog
 from ray.rllib.utils.framework import try_import_torch
 
@@ -634,16 +635,18 @@ def train(args):
         "num_cpus_per_env_runner": 4,
         "num_gpus_per_learner": 1.0,
         "num_learners": 4,
-        "rl_module_spec": {
-            "module_class": ChessMaskedRLModule,
-            "model_config_dict": {"evaluation_mode": False}
-        },
         "train_batch_size": 131072,
         "sgd_minibatch_size": 16384,
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff
     }
+    
+    # Create a proper RLModuleSpec instance
+    config["rl_module_spec"] = RLModuleSpec(
+        module_class=ChessMaskedRLModule,
+        model_config_dict={"evaluation_mode": False}
+    )
     
     print("\n===== Multi-GPU Learner Configuration =====")
     print(f"GPU allocation: 4 learners with 1.0 GPU each")
@@ -694,14 +697,17 @@ def evaluate(args):
         "framework": "torch",
         "num_workers": 0,  # Single worker for evaluation
         "num_gpus": 1 if args.device == "cuda" else 0,  # Use exact integers for GPU allocation
-        # Use RLModule API instead of custom_model
-        "module": ChessMaskedRLModule,
-        "module_config": {
-            "evaluation_mode": True  # Explicitly use evaluation mode (disables exploration)
-        },
+        # Use RLModule API with proper RLModuleSpec
+        "_enable_rl_module_api": True,
         # Critical: Ensure we're using deterministic actions (no exploration)
         "explore": False,
     }
+    
+    # Create a proper RLModuleSpec instance for evaluation
+    config["rl_module_spec"] = RLModuleSpec(
+        module_class=ChessMaskedRLModule,
+        model_config_dict={"evaluation_mode": True}
+    )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
     # Create algorithm and restore from checkpoint
