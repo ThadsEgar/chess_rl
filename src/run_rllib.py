@@ -756,7 +756,7 @@ def train(args):
     # - 3:3 GPU split
     # - 20 workers with 4 CPUs each
     driver_gpus = 2           # Fixed at 3 GPUs for driver
-    worker_gpus = 4           # Fixed at 3 GPUs for workers
+    worker_gpus = 3.95           # Fixed at 3 GPUs for workers
     num_workers = 10          # Fixed at 20 workers
     cpus_per_worker = 9       # Fixed at 4 CPUs per worker
     driver_cpus = 10       # Fixed at 8 CPUs for driver
