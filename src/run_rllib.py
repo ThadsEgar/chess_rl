@@ -925,7 +925,6 @@ def train(args):
     config["num_gpus_per_env_runner"] = 0.0            # Workers don't need GPUs with learner API
     config["num_learners"] = 4                         # Use 4 dedicated learners (matching your GPU count)
     config["num_gpus_per_learner"] = 1.0               # Each learner gets 1 full GPU
-    config["learner_gpu_ids"] = [0, 1, 2, 3]           # Explicitly assign GPUs to learners
     config["torch_compile_learner"] = True             # Optimize torch operations with torch.compile
     
     # Optional but helpful performance improvements
