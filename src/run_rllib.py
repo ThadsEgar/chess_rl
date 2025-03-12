@@ -798,9 +798,11 @@ def train(args):
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
         
-        # Exploration is now handled directly in the model's forward method
-        # This avoids conflicts with RLlib's exploration framework
-        "exploration_config": None,
+        # Use StochasticSampling for exploration instead of None
+        # This is a baseline exploration strategy that works with our custom model's logic
+        "exploration_config": {
+            "type": "StochasticSampling",
+        },
         
         # Memory optimization for lower GPU memory usage
         "_disable_preprocessor_api": False,
@@ -873,7 +875,9 @@ def evaluate(args):
         },
         # Critical: Ensure we're using deterministic actions (no exploration)
         "explore": False,
-        "exploration_config": None,
+        "exploration_config": {
+            "type": "StochasticSampling",
+        },
     }
     
     print(f"Loading checkpoint from: {args.checkpoint}")
