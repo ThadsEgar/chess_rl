@@ -908,7 +908,7 @@ def train(args):
         # Set up dedicated learners
         "num_learners": 5,                          # Use 5 dedicated learner processes
         "num_gpus_per_learner": 1.0,                # Each learner gets a full GPU
-        "num_gpus": 1.0,                            # Driver only needs 1 GPU
+        "num_gpus": 0.99999,                            # Driver only needs 1 GPU
         "num_gpus_per_env_runner": 0.0,             # Don't allocate GPUs to workers with learner API
         
         # Optimize data flow to learners
