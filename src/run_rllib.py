@@ -203,12 +203,22 @@ class ChessMaskedRLModule(TorchRLModule):
             # Apply gradient clipping to logits
             masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
             
-            return {"action_dist": masked_logits}
+            # Get the most likely action (for deterministic policy)
+            actions = torch.argmax(masked_logits, dim=-1)
+            
+            return {
+                "action_dist": masked_logits,
+                "actions": actions  # Add actions key for RLlib
+            }
         
         # If no action mask available, return unmasked logits (with clipping)
         action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
+        actions = torch.argmax(action_logits, dim=-1)
             
-        return {"action_dist": action_logits}
+        return {
+            "action_dist": action_logits,
+            "actions": actions  # Add actions key for RLlib
+        }
     
     def _forward_exploration(self, batch, **kwargs):
         """Forward pass with exploration possibilities"""
@@ -277,13 +287,25 @@ class ChessMaskedRLModule(TorchRLModule):
             
             # Apply gradient clipping to logits
             masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
+            
+            # Get the most likely action (for deterministic policy)
+            actions = torch.argmax(masked_logits, dim=-1)
                 
-            return {"action_dist": masked_logits, "vf": value}
+            return {
+                "action_dist": masked_logits, 
+                "vf": value,
+                "actions": actions  # Add actions key for RLlib
+            }
         
         # If no action mask available, return unmasked logits (with clipping)
         action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
+        actions = torch.argmax(action_logits, dim=-1)
             
-        return {"action_dist": action_logits, "vf": value}
+        return {
+            "action_dist": action_logits, 
+            "vf": value,
+            "actions": actions  # Add actions key for RLlib
+        }
     
     def forward(self, batch, **kwargs):
         """Forward method for both training and inference"""
@@ -653,7 +675,10 @@ def train(args):
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 20,  # Increase timeout to 5 minutes
+        "sample_timeout_s": 20,  # Increase timeout to 20 seconds
+        "rollout_fragment_length": 200,  # Reduce fragment length for faster sampling
+        "num_envs_per_env_runner": 1,  # Use a single environment per worker
+        "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
         "callbacks": ChessMetricsCallback,  # Add metrics callback
     }
     
