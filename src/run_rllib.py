@@ -26,6 +26,46 @@ from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 torch, nn = try_import_torch()
 
 
+class ChessMetricsCallback(DefaultCallbacks):
+    """Callback to track chess-specific metrics during training"""
+    
+    def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        """Called at the end of an episode"""
+        # Extract game outcome from info
+        info = episode.last_info_for()
+        if info and "outcome" in info:
+            outcome = info["outcome"]
+            # Record metrics based on outcome
+            if outcome == "white_win":
+                episode.custom_metrics["white_win"] = 1.0
+                episode.custom_metrics["black_win"] = 0.0
+                episode.custom_metrics["draw"] = 0.0
+            elif outcome == "black_win":
+                episode.custom_metrics["white_win"] = 0.0
+                episode.custom_metrics["black_win"] = 1.0
+                episode.custom_metrics["draw"] = 0.0
+            elif outcome == "draw":
+                episode.custom_metrics["white_win"] = 0.0
+                episode.custom_metrics["black_win"] = 0.0
+                episode.custom_metrics["draw"] = 1.0
+            
+            # Record termination reason if available
+            if "termination_reason" in info:
+                reason = info["termination_reason"]
+                if reason == "checkmate":
+                    episode.custom_metrics["checkmate"] = 1.0
+                elif reason == "stalemate":
+                    episode.custom_metrics["stalemate"] = 1.0
+                elif reason == "insufficient_material":
+                    episode.custom_metrics["insufficient_material"] = 1.0
+                elif reason == "fifty_moves":
+                    episode.custom_metrics["fifty_moves"] = 1.0
+                elif reason == "repetition":
+                    episode.custom_metrics["repetition"] = 1.0
+                elif reason == "move_limit_exceeded":
+                    episode.custom_metrics["move_limit_exceeded"] = 1.0
+
+
 class ChessMaskedRLModule(TorchRLModule):
     """Custom RLModule for Chess that supports action masking - compatible with the new RLlib API stack"""
     
@@ -605,14 +645,12 @@ def train(args):
         "num_gpus_per_learner": 1.0,               # Allocate 1 full GPU to each learner
         "torch_compile_learner": True,             # Use torch.compile() for better performance
         
-        # Model configuration
-        "module": {
-            "_target_": ChessMaskedRLModule,
-            "model_config": {
-                "handle_missing_action_mask": True,
-                "no_final_linear": True,  # Prevent RLlib from adding extra layers
-                "evaluation_mode": False  # Explicitly set training mode
-            }
+        # Model configuration - use the new format for RLModule
+        "module": ChessMaskedRLModule,
+        "module_config": {
+            "handle_missing_action_mask": True,
+            "no_final_linear": True,  # Prevent RLlib from adding extra layers
+            "evaluation_mode": False  # Explicitly set training mode
         },
         
         # Disable preprocessors that are causing the dimension mismatch
@@ -710,11 +748,9 @@ def evaluate(args):
         "num_workers": 0,  # Single worker for evaluation
         "num_gpus": 1 if args.device == "cuda" else 0,  # Use exact integers for GPU allocation
         # Use RLModule API instead of custom_model
-        "module": {
-            "_target_": ChessMaskedRLModule,
-            "model_config": {
-                "evaluation_mode": True  # Explicitly use evaluation mode (disables exploration)
-            }
+        "module": ChessMaskedRLModule,
+        "module_config": {
+            "evaluation_mode": True  # Explicitly use evaluation mode (disables exploration)
         },
         # Critical: Ensure we're using deterministic actions (no exploration)
         "explore": False,
