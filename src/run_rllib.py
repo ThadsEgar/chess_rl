@@ -670,14 +670,14 @@ def train(args):
         "num_cpus_per_env_runner": 4,
         "num_gpus_per_learner": 1.0,
         "num_learners": 4,
-        "train_batch_size": 131072,
-        "sgd_minibatch_size": 16384,
+        "train_batch_size": 16384,
+        "sgd_minibatch_size": 2048,
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 20,  # Increase timeout to 20 seconds
+        "sample_timeout_s": 600,  # Increase timeout to 20 seconds
         "rollout_fragment_length": 200,  # Reduce fragment length for faster sampling
-        "num_envs_per_env_runner": 1,  # Use a single environment per worker
+        "num_envs_per_env_runner": 4,  # Use a single environment per worker
         "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
         "callbacks": ChessMetricsCallback,  # Add metrics callback
     }
