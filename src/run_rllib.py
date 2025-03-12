@@ -775,13 +775,23 @@ def train(args):
     cpus_per_worker = max(1, (actual_cpus - driver_cpus) // num_workers)
     num_envs = 8  # Environments per worker
     
-    # GPU allocation - 3.0/3.0 split as requested (if available)
+    # GPU allocation - use integers for better precision
     if actual_gpus >= 6:
-        driver_gpus = 3
-        worker_gpus = 3
+        driver_gpus = 3  # Integer - 3 GPUs for driver
+        worker_gpus = 3  # Integer - 3 GPUs for workers
+    else:
+        # For fewer GPUs, allocate half to driver, half to workers
+        driver_gpus = actual_gpus // 2  # Integer division
+        worker_gpus = actual_gpus - driver_gpus  # Ensure exact sum
     
-    gpus_per_worker = worker_gpus / num_workers if num_workers > 0 else 0
-    gpus_per_worker = int(gpus_per_worker)
+    # Calculate GPUs per worker with proper rounding
+    if num_workers > 0 and worker_gpus > 0:
+        # Use integer division and convert back to float if needed
+        gpus_per_worker = worker_gpus / num_workers
+        # Round to 6 decimal places to avoid floating point precision issues
+        gpus_per_worker = round(gpus_per_worker, 6)
+    else:
+        gpus_per_worker = 0.0
     
     # Batch sizes based on available resources
     train_batch_size = 262144 if actual_gpus >= 3 else 131072  # Scale down for fewer GPUs
@@ -789,8 +799,13 @@ def train(args):
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
     print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request} of {actual_cpus} available")
-    print(f"GPU allocation: {driver_gpus} (driver) + {worker_gpus} (workers) = {actual_gpus} total")
-    print(f"GPU per worker: {gpus_per_worker:.4f}")
+    
+    # Verify that our GPU allocation math is precise
+    total_gpu_request = driver_gpus + (gpus_per_worker * num_workers)
+    # Round to 6 decimal places to avoid floating point precision issues in display
+    total_gpu_request = round(total_gpu_request, 6)
+    print(f"GPU allocation: {driver_gpus} (driver) + {worker_gpus} (workers) = {total_gpu_request} total")
+    print(f"GPU per worker: {gpus_per_worker:.6f}")
     print(f"Batch size: {train_batch_size} (train) / {sgd_minibatch_size} (SGD)")
     print("==================================\n")
     
@@ -835,13 +850,13 @@ def train(args):
         "_enable_learner_api": False,
         "enable_rl_module_and_learner": False,
         
-        # Resource allocation
-        "num_cpus_for_driver": driver_cpus,
-        "num_workers": num_workers,
-        "num_cpus_per_env_runner": cpus_per_worker,
-        "num_gpus": driver_gpus,
-        "num_gpus_per_env_runner": gpus_per_worker,
-        "num_envs_per_env_runner": num_envs,
+        # Resource allocation - use integers to avoid floating point issues
+        "num_cpus_for_driver": int(driver_cpus),  # Ensure integer
+        "num_workers": int(num_workers),  # Ensure integer
+        "num_cpus_per_env_runner": int(cpus_per_worker),  # Ensure integer
+        "num_gpus": float(int(driver_gpus)) if driver_gpus == int(driver_gpus) else round(driver_gpus, 6),  # Clean float
+        "num_gpus_per_env_runner": round(gpus_per_worker, 6),  # Round to 6 decimal places
+        "num_envs_per_env_runner": int(num_envs),  # Ensure integer
         
         # Model configuration
         "model": {
@@ -849,9 +864,9 @@ def train(args):
             "custom_model_config": {"handle_missing_action_mask": True}
         },
         
-        # Training parameters optimized for 6 GPUs and 128 CPU cores with 3.0/3.0 GPU split
-        "train_batch_size": train_batch_size,
-        "sgd_minibatch_size": sgd_minibatch_size,
+        # Training parameters
+        "train_batch_size": int(train_batch_size),  # Ensure integer
+        "sgd_minibatch_size": int(sgd_minibatch_size),  # Ensure integer
         "num_sgd_iter": 10,
         "lr": 5e-5,  # Reduced for numerical stability
         "callbacks": ChessMetricsCallback,
@@ -944,7 +959,7 @@ def evaluate(args):
         "env": "chess_env",
         "framework": "torch",
         "num_workers": 0,  # Single worker for evaluation
-        "num_gpus": 1 if args.device == "cuda" else 0,
+        "num_gpus": 1 if args.device == "cuda" else 0,  # Use exact integers for GPU allocation
         "model": {
             "custom_model": "chess_masked_model",
             "custom_model_config": {
