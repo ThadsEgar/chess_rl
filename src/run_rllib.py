@@ -174,9 +174,11 @@ class ChessMaskedRLModule(TorchRLModule):
         else:
             # Handle non-dict inputs (should be rare with the wrapper)
             device = next(self.parameters()).device
-            board = torch.zeros((batch.shape[0], 13, 8, 8), device=device)
-            action_mask = torch.ones((batch.shape[0], 20480), device=device)
-            
+            # Create a default batch size of 1 if batch is not a tensor with shape
+            batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
+            board = torch.zeros((batch_size, 13, 8, 8), device=device)
+            action_mask = torch.ones((batch_size, 20480), device=device)
+        
         # Process through CNN feature extractor
         features = self.features_extractor(board)
         
@@ -215,8 +217,10 @@ class ChessMaskedRLModule(TorchRLModule):
         else:
             # Handle non-dict inputs (should be rare with the wrapper)
             device = next(self.parameters()).device
-            board = torch.zeros((batch.shape[0], 13, 8, 8), device=device)
-            action_mask = torch.ones((batch.shape[0], 20480), device=device)
+            # Create a default batch size of 1 if batch is not a tensor with shape
+            batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
+            board = torch.zeros((batch_size, 13, 8, 8), device=device)
+            action_mask = torch.ones((batch_size, 20480), device=device)
         
         # Get device from the input tensors
         device = board.device
@@ -650,7 +654,7 @@ def train(args):
     # Create a proper RLModuleSpec instance
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
-        model_config={"evaluation_mode": False}
+        model_config_dict={"evaluation_mode": False}
     )
     
     print("\n===== Multi-GPU Learner Configuration =====")
@@ -665,7 +669,7 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
-        metric=None,
+        metric="episode_reward_mean",
         mode="max",
         resume="AUTO",  # AUTO mode: resume if checkpoint exists, otherwise start fresh
         restore=restore_path,  # Add this for restoring from specific checkpoint
@@ -711,7 +715,7 @@ def evaluate(args):
     # Create a proper RLModuleSpec instance for evaluation
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
-        model_config={"evaluation_mode": True}
+        model_config_dict={"evaluation_mode": True}
     )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
