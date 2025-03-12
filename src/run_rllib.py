@@ -665,7 +665,7 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
-        metric="env_runners/episode_reward_mean",
+        metric="episode_reward_mean",
         mode="max",
         resume="AUTO",  # AUTO mode: resume if checkpoint exists, otherwise start fresh
         restore=restore_path,  # Add this for restoring from specific checkpoint
