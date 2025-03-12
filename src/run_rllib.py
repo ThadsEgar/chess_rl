@@ -318,7 +318,57 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
         # Initialize the models
         self._value = None
         
+        # Epsilon-greedy exploration parameters
+        self.initial_epsilon = 0.1  # 10% random action probability
+        self.final_epsilon = 0.02   # 2% random action probability
+        self.epsilon_timesteps = 1_000_000  # Decay over 1M timesteps
+        self.current_epsilon = self.initial_epsilon
+        self.random_exploration = True  # Set to False to disable exploration
+        self.timesteps = 0  # Track timesteps for epsilon decay
+        
+        # Check if we're in evaluation mode from model config
+        model_config_dict = model_config.get("custom_model_config", {})
+        if model_config_dict.get("evaluation_mode", False):
+            self.random_exploration = False
+            print("Model initialized in evaluation mode, exploration disabled")
+        else:
+            print(f"Initialized epsilon-greedy exploration with initial_epsilon={self.initial_epsilon}, final_epsilon={self.final_epsilon}")
+    
+    def set_evaluation_mode(self, evaluation_mode=True):
+        """Explicitly set whether this model is in evaluation mode (disables exploration)"""
+        previous_mode = not self.random_exploration
+        if evaluation_mode:
+            self.random_exploration = False
+            print("Model set to evaluation mode, exploration disabled")
+        else:
+            self.random_exploration = True
+            print("Model set to training mode, exploration enabled")
+        return previous_mode
+    
+    def update_epsilon(self, num_steps=None):
+        """Update exploration epsilon based on timesteps or the provided step count"""
+        if num_steps is not None:
+            self.timesteps = num_steps
+        else:
+            self.timesteps += 1
+            
+        # Linear decay from initial_epsilon to final_epsilon over epsilon_timesteps
+        if self.timesteps < self.epsilon_timesteps:
+            self.current_epsilon = self.initial_epsilon - (self.initial_epsilon - self.final_epsilon) * (self.timesteps / self.epsilon_timesteps)
+        else:
+            self.current_epsilon = self.final_epsilon
+            
+        return self.current_epsilon
+        
     def forward(self, input_dict, state, seq_lens):
+        # Check if we're in inference mode
+        # RLlib sets deterministic=True during evaluation/inference
+        inference_mode = input_dict.get("deterministic", False)
+        if inference_mode:
+            # Temporarily disable exploration during this forward pass
+            original_exploration = self.random_exploration
+            self.random_exploration = False
+        
         # Extract observation
         if "obs" in input_dict:
             # Extract relevant observation parts
@@ -379,9 +429,42 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             
             # Apply the mask to the logits
             masked_logits = action_logits + inf_mask
+            
+            # Simple epsilon-greedy exploration - only apply during training
+            if self.random_exploration:
+                # Decay epsilon over time
+                self.update_epsilon()
+                batch_size = masked_logits.shape[0]
+                
+                # Generate random numbers to decide which samples get random actions
+                random_samples = torch.rand(batch_size, device=self.device) < self.current_epsilon
+                
+                # For samples selected for random exploration
+                for i in range(batch_size):
+                    if random_samples[i]:
+                        # Find legal actions (mask value == 1 or equivalently, where inf_mask == 0)
+                        legal_actions = torch.where(action_mask[i] > 0)[0]
+                        
+                        # Only proceed if there are legal actions
+                        if len(legal_actions) > 0:
+                            # Choose a random legal action
+                            random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,))].item()
+                            
+                            # Set logits to favor this random action
+                            masked_logits[i] = torch.full_like(masked_logits[i], -10.0)
+                            masked_logits[i, random_action_idx] = 10.0
+            
+            # If we temporarily disabled exploration, restore it
+            if inference_mode:
+                self.random_exploration = original_exploration
+                
             return masked_logits, state
         
         # If no action mask available, return unmasked logits
+        # If we temporarily disabled exploration, restore it
+        if inference_mode:
+            self.random_exploration = original_exploration
+            
         return action_logits, state
         
     def value_function(self):
@@ -712,13 +795,9 @@ def train(args):
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
         
-        # Add epsilon-greedy exploration for occasional random moves
-        "exploration_config": {
-            "type": "EpsilonGreedy",
-            "initial_epsilon": 0.1,    # Start with 10% random actions
-            "final_epsilon": 0.5,     # End with 5% random actions (1/20 moves)
-            "epsilon_timesteps": 20_000_000,  # Decay over 20M timesteps
-        },
+        # Exploration is now handled directly in the model's forward method
+        # This avoids conflicts with RLlib's exploration framework
+        "exploration_config": None,
         
         # Memory optimization for lower GPU memory usage
         "_disable_preprocessor_api": False,
@@ -760,7 +839,91 @@ def train(args):
 
 def evaluate(args):
     """Evaluate a trained policy"""
-    raise NotImplementedError("Evaluation mode not implemented yet")
+    if not args.checkpoint:
+        print("Error: Checkpoint path required for evaluation mode")
+        return
+
+    # Check if checkpoint exists
+    if not os.path.exists(args.checkpoint):
+        print(f"Error: Checkpoint path '{args.checkpoint}' does not exist")
+        return
+    
+    # Initialize Ray
+    ray.init(ignore_reinit_error=True, include_dashboard=args.dashboard)
+    
+    # Register environment and model same as in training
+    ModelCatalog.register_custom_model("chess_masked_model", ChessMaskedModel)
+    tune.register_env("chess_env", create_rllib_chess_env)
+    
+    # Create evaluation configuration
+    config = {
+        "env": "chess_env",
+        "framework": "torch",
+        "num_workers": 0,  # Single worker for evaluation
+        "num_gpus": 1 if args.device == "cuda" else 0,
+        "model": {
+            "custom_model": "chess_masked_model",
+            "custom_model_config": {
+                "handle_missing_action_mask": True,
+                "evaluation_mode": True  # Explicitly use evaluation mode (disables exploration)
+            }
+        },
+        # Critical: Ensure we're using deterministic actions (no exploration)
+        "explore": False,
+        "exploration_config": None,
+    }
+    
+    print(f"Loading checkpoint from: {args.checkpoint}")
+    # Create algorithm and restore from checkpoint
+    algo = PPO(config=config)
+    algo.restore(args.checkpoint)
+    
+    # Create environment for evaluation
+    env = create_rllib_chess_env({})
+    
+    # Run evaluation
+    num_episodes = 50  # Number of games to evaluate
+    total_rewards = []
+    outcomes = {"white_win": 0, "black_win": 0, "draw": 0, "unknown": 0}
+    
+    print(f"Evaluating model over {num_episodes} episodes...")
+    for episode in range(num_episodes):
+        obs, info = env.reset()
+        done = False
+        truncated = False
+        episode_reward = 0
+        steps = 0
+        
+        while not (done or truncated):
+            # Get action from policy, using deterministic=True to disable exploration
+            action = algo.compute_single_action(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            episode_reward += reward
+            steps += 1
+            
+            # Optionally render if requested
+            if args.render:
+                env.render()
+        
+        # Record outcome
+        outcome = info.get("outcome", "unknown")
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        
+        total_rewards.append(episode_reward)
+        print(f"Episode {episode+1}/{num_episodes}: Reward = {episode_reward}, Steps = {steps}, Outcome = {outcome}")
+    
+    # Print evaluation results
+    print("\n----- Evaluation Results -----")
+    print(f"Average Episode Reward: {sum(total_rewards) / len(total_rewards):.2f}")
+    print(f"Win %: White={outcomes['white_win']/num_episodes*100:.1f}%, Black={outcomes['black_win']/num_episodes*100:.1f}%, Draw={outcomes['draw']/num_episodes*100:.1f}%")
+    print(f"Total Outcomes: White Wins: {outcomes['white_win']}, Black Wins: {outcomes['black_win']}, Draws: {outcomes['draw']}")
+    print("-----------------------------\n")
+    
+    # Close environment
+    env.close()
+    
+    # Shutdown Ray
+    ray.shutdown()
 
 
 def main():
