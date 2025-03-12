@@ -731,83 +731,63 @@ def train(args):
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         print("🚀 Enabled PyTorch CUDA optimizations")
     
-    # Detect available CPUs and GPUs
-    import multiprocessing
-    import torch
-    detected_cpus = min(128, multiprocessing.cpu_count())  # Cap at 128 for large systems
-    detected_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    
-    print(f"System hardware detected: {detected_cpus} CPUs, {detected_gpus} GPUs")
-    
-    # Initialize Ray
+    # Initialize Ray with fixed number of CPUs and GPUs
     if args.redis_password:
         ray.init(
             address=args.head_address,
             ignore_reinit_error=True, 
             include_dashboard=args.dashboard,
-            _redis_password=args.redis_password,
-            num_cpus=detected_cpus,
+            _redis_password=args.redis_password
         )
     else:
         ray.init(
             address="auto" if args.distributed else None,
             ignore_reinit_error=True,
-            include_dashboard=args.dashboard,
-            num_cpus=detected_cpus,
+            include_dashboard=args.dashboard
         )
     
-    # Hardware configuration for 6x RTX 3090, 85 vCPUs, 124GB RAM
+    # Hardware configuration - using fixed allocation as requested
     print("\n===== Hardware Configuration =====")
     print(f"Ray runtime resources: {ray.available_resources()}")
-    actual_gpus = int(ray.available_resources().get("GPU", 0))
-    actual_cpus = int(ray.available_resources().get("CPU", 0))
     
-    print(f"Available resources: {actual_gpus} GPUs and {actual_cpus} CPU cores")
+    # Fixed resource allocation as requested:
+    # - 3:3 GPU split
+    # - 20 workers with 4 CPUs each
+    driver_gpus = 3           # Fixed at 3 GPUs for driver
+    worker_gpus = 3           # Fixed at 3 GPUs for workers
+    num_workers = 20          # Fixed at 20 workers
+    cpus_per_worker = 4       # Fixed at 4 CPUs per worker
+    driver_cpus = 8           # Fixed at 8 CPUs for driver
+    num_envs = 8              # Environments per worker
     
-    # Resource allocation - use fixed values as requested
-    cpus_per_worker = 4  # Fixed at 4 CPUs per worker as requested
-    driver_cpus = 16      # Fixed allocation for driver
-    
-    # Calculate how many workers we can have with the remaining CPUs
-    remaining_cpus = actual_cpus - driver_cpus
-    num_workers = max(1, remaining_cpus // cpus_per_worker)
-    
-    num_envs = 8  # Environments per worker
-    
-    # GPU allocation - use a simple integer division approach
-    driver_gpus = 1  # Allocate 1 GPU for driver (if available)
-    
-    # Calculate worker GPUs (ensure at least one driver GPU if any are available)
-    worker_gpus = max(0, actual_gpus - driver_gpus)
-    
-    # Calculate GPUs per worker (use integer division and only convert to float at the end)
+    # Calculate exact GPU allocation per worker
     if num_workers > 0 and worker_gpus > 0:
-        # Integer division first
-        gpus_per_worker_int = worker_gpus // num_workers
-        gpus_per_worker_remainder = worker_gpus % num_workers
-        
-        # Only convert to float if there's a remainder to distribute
-        if gpus_per_worker_remainder > 0:
-            gpus_per_worker = gpus_per_worker_int + (gpus_per_worker_remainder / num_workers)
-            # Round to 3 decimal places to avoid floating point issues
-            gpus_per_worker = round(gpus_per_worker, 3)
+        # If workers > GPUs, give each worker a fixed fraction (no remainder)
+        if num_workers >= worker_gpus:
+            # Integer workers per GPU
+            workers_per_gpu = num_workers // worker_gpus
+            
+            # Distribute GPUs evenly, ensuring each worker gets the same amount
+            # (e.g., with 3 GPUs and 20 workers, each worker gets 3/20 = 0.15 GPU)
+            gpus_per_worker = worker_gpus / num_workers
+            
+            # Round to 2 decimal places to avoid floating point issues
+            gpus_per_worker = round(gpus_per_worker, 2)
         else:
-            gpus_per_worker = float(gpus_per_worker_int)
+            # If GPUs > workers, each worker gets at least 1 GPU
+            gpus_per_worker = worker_gpus // num_workers
     else:
-        gpus_per_worker = 0.0
+        gpus_per_worker = 0
     
-    # Batch sizes based on available resources
+    # Use fixed batch sizes
     train_batch_size = 131072
     sgd_minibatch_size = 8192
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
-    print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request} of {actual_cpus} available")
+    print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request}")
     
-    # Verify that our GPU allocation math is precise
-    total_gpu_request = driver_gpus + (gpus_per_worker * num_workers)
-    # Round to avoid floating point precision issues
-    total_gpu_request = round(total_gpu_request, 3)
-    print(f"GPU allocation: {driver_gpus} (driver) + {gpus_per_worker}*{num_workers} (workers) = {total_gpu_request} total of {actual_gpus} available")
+    # Print GPU allocation
+    print(f"GPU allocation: {driver_gpus} (driver) + {gpus_per_worker}*{num_workers} (workers) = {driver_gpus + (gpus_per_worker * num_workers)}")
     print(f"Batch size: {train_batch_size} (train) / {sgd_minibatch_size} (SGD)")
     print("==================================\n")
     
@@ -843,7 +823,7 @@ def train(args):
     print(f"This will encourage the agent to explore diverse moves early and exploit its knowledge later.")
     print(f"================================\n")
     
-    # Optimize configuration for 6x RTX 3090, 85 vCPUs, 124GB RAM
+    # Optimize configuration with fixed resource allocation
     config = {
         "env": "chess_env",
         "framework": "torch",
@@ -852,13 +832,13 @@ def train(args):
         "_enable_learner_api": False,
         "enable_rl_module_and_learner": False,
         
-        # Resource allocation - use integers to avoid floating point issues
-        "num_cpus_for_driver": int(driver_cpus),  # Ensure integer
-        "num_workers": int(num_workers),  # Ensure integer
-        "num_cpus_per_env_runner": int(cpus_per_worker),  # Ensure integer
-        "num_gpus": float(int(driver_gpus)) if driver_gpus == int(driver_gpus) else round(driver_gpus, 4),  # Clean float
-        "num_gpus_per_env_runner": round(gpus_per_worker -0.001, 4),  # Round to 6 decimal places
-        "num_envs_per_env_runner": int(num_envs),  # Ensure integer
+        # Resource allocation - use whole numbers as requested
+        "num_cpus_for_driver": driver_cpus,
+        "num_workers": num_workers,
+        "num_cpus_per_env_runner": cpus_per_worker,
+        "num_gpus": driver_gpus,
+        "num_cpus_per_env_runner": gpus_per_worker,
+        "num_cpus_per_env_runner": num_envs,
         
         # Model configuration
         "model": {
