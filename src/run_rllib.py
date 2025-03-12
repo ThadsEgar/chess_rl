@@ -645,7 +645,7 @@ def train(args):
     # Create a proper RLModuleSpec instance
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
-        model_config_dict={"evaluation_mode": False}
+        model_config={"evaluation_mode": False}
     )
     
     print("\n===== Multi-GPU Learner Configuration =====")
