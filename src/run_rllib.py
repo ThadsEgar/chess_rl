@@ -675,7 +675,7 @@ def train(args):
         "framework": "torch",
         "disable_env_checking": True,
         "_enable_rl_module_api": True,
-        "_enable_learner_api": False,
+        "_enable_learner_api": True,
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
         "num_cpus_per_worker": cpus_per_worker,
