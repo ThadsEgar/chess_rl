@@ -628,7 +628,7 @@ def train(args):
         "num_sgd_iter": 3,                         # Reduce iteration count for faster training
         "num_epochs": 3,                            # Fewer epochs for faster training
         "lr": 5e-5,  # Reduced for numerical stability
-        "callbacks": ChessMetricsCallback,
+        "callbacks": None,
         "create_env_on_driver": False,  # Disable environment on driver to save resources
         "log_level": "INFO",
         
