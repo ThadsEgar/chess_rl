@@ -370,10 +370,7 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             self.random_exploration = False
         
         # Get the device from the input tensors
-        if isinstance(input_dict.get("obs", {}), dict) and "board" in input_dict["obs"] and hasattr(input_dict["obs"]["board"], "device"):
-            device = input_dict["obs"]["board"].device
-        else:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Extract observation
         if "obs" in input_dict:
