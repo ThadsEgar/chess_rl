@@ -781,6 +781,7 @@ def train(args):
         worker_gpus = 3
     
     gpus_per_worker = worker_gpus / num_workers if num_workers > 0 else 0
+    gpus_per_worker = int(gpus_per_worker)
     
     # Batch sizes based on available resources
     train_batch_size = 262144 if actual_gpus >= 3 else 131072  # Scale down for fewer GPUs
