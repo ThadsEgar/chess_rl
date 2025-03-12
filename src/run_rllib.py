@@ -181,6 +181,16 @@ class ChessMaskedRLModule(TorchRLModule):
             board = torch.zeros((batch_size, 13, 8, 8), device=device)
             action_mask = torch.zeros((batch_size, 20480), device=device)
         
+        # Ensure we have a batch dimension
+        if len(board.shape) == 3:  # If missing batch dimension (13, 8, 8)
+            board = board.unsqueeze(0)  # Add batch dimension -> (1, 13, 8, 8)
+            
+        if len(action_mask.shape) == 1:  # If missing batch dimension (20480,)
+            action_mask = action_mask.unsqueeze(0)  # Add batch dimension -> (1, 20480)
+            
+        # Get batch size from board tensor
+        batch_size = board.shape[0]
+        
         # Process through CNN feature extractor
         features = self.features_extractor(board)
         
@@ -192,10 +202,6 @@ class ChessMaskedRLModule(TorchRLModule):
         
         # Apply action mask by setting illegal actions to a large negative number
         if action_mask is not None:
-            # Ensure action_mask is properly shaped for broadcasting
-            if len(action_mask.shape) == 1:
-                action_mask = action_mask.unsqueeze(0)
-                
             # Apply the mask to the logits
             inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
             masked_logits = action_logits + inf_mask
@@ -206,18 +212,24 @@ class ChessMaskedRLModule(TorchRLModule):
             # Get the most likely action (for deterministic policy)
             actions = torch.argmax(masked_logits, dim=-1)
             
+            # Print shapes for debugging
+            print(f"Output shapes - masked_logits: {masked_logits.shape}, actions: {actions.shape}")
+            
             return {
                 "action_dist": masked_logits,
-                "actions": actions  # Add actions key for RLlib
+                "actions": actions
             }
         
         # If no action mask available, return unmasked logits (with clipping)
         action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
         actions = torch.argmax(action_logits, dim=-1)
+        
+        # Print shapes for debugging
+        print(f"Output shapes - action_logits: {action_logits.shape}, actions: {actions.shape}")
             
         return {
             "action_dist": action_logits,
-            "actions": actions  # Add actions key for RLlib
+            "actions": actions
         }
     
     def _forward_exploration(self, batch, **kwargs):
@@ -238,6 +250,16 @@ class ChessMaskedRLModule(TorchRLModule):
         
         # Get device from the input tensors
         device = board.device
+        
+        # Ensure we have a batch dimension
+        if len(board.shape) == 3:  # If missing batch dimension (13, 8, 8)
+            board = board.unsqueeze(0)  # Add batch dimension -> (1, 13, 8, 8)
+            
+        if len(action_mask.shape) == 1:  # If missing batch dimension (20480,)
+            action_mask = action_mask.unsqueeze(0)  # Add batch dimension -> (1, 20480)
+            
+        # Get batch size from board tensor
+        batch_size = board.shape[0]
             
         # Process through CNN feature extractor
         features = self.features_extractor(board)
@@ -253,10 +275,6 @@ class ChessMaskedRLModule(TorchRLModule):
         
         # Apply action mask by setting illegal actions to a large negative number
         if action_mask is not None:
-            # Ensure action_mask is properly shaped for broadcasting
-            if len(action_mask.shape) == 1:
-                action_mask = action_mask.unsqueeze(0)
-                
             # Apply the mask to the logits
             inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
             masked_logits = action_logits + inf_mask
@@ -265,7 +283,6 @@ class ChessMaskedRLModule(TorchRLModule):
             if self.random_exploration:
                 # Decay epsilon over time
                 self.update_epsilon()
-                batch_size = masked_logits.shape[0]
                 
                 # Generate random numbers to decide which samples get random actions
                 random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
@@ -290,21 +307,45 @@ class ChessMaskedRLModule(TorchRLModule):
             
             # Get the most likely action (for deterministic policy)
             actions = torch.argmax(masked_logits, dim=-1)
+            
+            # Ensure value has the same batch dimension as actions
+            if value.shape[0] != batch_size:
+                # If value is a single value, expand it to match batch size
+                if len(value.shape) == 1:
+                    value = value.repeat(batch_size, 1)
+                else:
+                    # If value is already batched but wrong size, repeat it
+                    value = value.repeat(batch_size, 1)
+            
+            # Print shapes for debugging
+            print(f"Output shapes - masked_logits: {masked_logits.shape}, value: {value.shape}, actions: {actions.shape}")
                 
             return {
                 "action_dist": masked_logits, 
                 "vf": value,
-                "actions": actions  # Add actions key for RLlib
+                "actions": actions
             }
         
         # If no action mask available, return unmasked logits (with clipping)
         action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
         actions = torch.argmax(action_logits, dim=-1)
+        
+        # Ensure value has the same batch dimension as actions
+        if value.shape[0] != batch_size:
+            # If value is a single value, expand it to match batch size
+            if len(value.shape) == 1:
+                value = value.repeat(batch_size, 1)
+            else:
+                # If value is already batched but wrong size, repeat it
+                value = value.repeat(batch_size, 1)
+            
+        # Print shapes for debugging
+        print(f"Output shapes - action_logits: {action_logits.shape}, value: {value.shape}, actions: {actions.shape}")
             
         return {
             "action_dist": action_logits, 
             "vf": value,
-            "actions": actions  # Add actions key for RLlib
+            "actions": actions
         }
     
     def forward(self, batch, **kwargs):
