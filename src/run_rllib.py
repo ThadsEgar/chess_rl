@@ -777,12 +777,8 @@ def train(args):
     
     # GPU allocation - 3.0/3.0 split as requested (if available)
     if actual_gpus >= 6:
-        driver_gpus = 3.0
-        worker_gpus = 3.0
-    else:
-        # Fallback for fewer GPUs
-        driver_gpus = actual_gpus / 2.0
-        worker_gpus = actual_gpus / 2.0
+        driver_gpus = 3
+        worker_gpus = 3
     
     gpus_per_worker = worker_gpus / num_workers if num_workers > 0 else 0
     
