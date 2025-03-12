@@ -755,12 +755,12 @@ def train(args):
     # Fixed resource allocation as requested:
     # - 3:3 GPU split
     # - 20 workers with 4 CPUs each
-    driver_gpus = 2           # Fixed at 3 GPUs for driver
-    worker_gpus = 3.9999           # Fixed at 3 GPUs for workers
+    driver_gpus = 4           # Fixed at 3 GPUs for driver
+    worker_gpus = 1.9999           # Fixed at 3 GPUs for workers
     num_workers = 8          # Fixed at 20 workers
-    cpus_per_worker = 8       # Fixed at 4 CPUs per worker
+    cpus_per_worker = 4       # Fixed at 4 CPUs per worker
     driver_cpus = 16       # Fixed at 8 CPUs for driver
-    num_envs = 16            # Environments per worker
+    num_envs = 8            # Environments per worker
     
     # Calculate exact GPU allocation per worker
     if num_workers > 0 and worker_gpus > 0:
