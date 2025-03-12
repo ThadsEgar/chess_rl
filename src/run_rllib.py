@@ -654,7 +654,7 @@ def train(args):
     # Create a proper RLModuleSpec instance
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
-        model_config_dict={"evaluation_mode": False}
+        model_config={"evaluation_mode": False}
     )
     
     print("\n===== Multi-GPU Learner Configuration =====")
@@ -669,7 +669,7 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,  # Detailed output
-        metric="episode_reward_mean",
+        metric=None,
         mode="max",
         resume="AUTO",  # AUTO mode: resume if checkpoint exists, otherwise start fresh
         restore=restore_path,  # Add this for restoring from specific checkpoint
@@ -715,7 +715,7 @@ def evaluate(args):
     # Create a proper RLModuleSpec instance for evaluation
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
-        model_config_dict={"evaluation_mode": True}
+        model_config={"evaluation_mode": True}
     )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
