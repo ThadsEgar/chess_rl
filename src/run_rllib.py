@@ -782,8 +782,8 @@ def train(args):
         gpus_per_worker = 0
     
     # Use fixed batch sizes
-    train_batch_size = 131072
-    sgd_minibatch_size = 8192
+    train_batch_size = 65536
+    sgd_minibatch_size = 4096
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
     print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request}")
