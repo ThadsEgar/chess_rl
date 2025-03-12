@@ -858,7 +858,9 @@ def train(args):
         # Training parameters
         "train_batch_size": int(train_batch_size),  # Ensure integer
         "sgd_minibatch_size": int(sgd_minibatch_size),  # Ensure integer
+        "mini_batch_size": int(sgd_minibatch_size),
         "num_sgd_iter": 5,
+        "num_epochs": 5,
         "lr": 5e-5,  # Reduced for numerical stability
         "callbacks": ChessMetricsCallback,
         "create_env_on_driver": False,  # Disable environment on driver to save resources
