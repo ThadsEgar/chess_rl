@@ -737,13 +737,15 @@ def train(args):
             address=args.head_address,
             ignore_reinit_error=True, 
             include_dashboard=args.dashboard,
-            _redis_password=args.redis_password
+            _redis_password=args.redis_password,
+            num_cpus=124,
         )
     else:
         ray.init(
             address="auto" if args.distributed else None,
             ignore_reinit_error=True,
-            include_dashboard=args.dashboard
+            include_dashboard=args.dashboard,
+            num_cpus=124,
         )
     
     # Hardware configuration - using fixed allocation as requested
