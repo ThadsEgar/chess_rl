@@ -903,6 +903,39 @@ def train(args):
         else:
             print(f"Warning: Checkpoint path {args.checkpoint} does not exist. Starting fresh.")
 
+    # Enable true multi-GPU training with the learner API
+    config.update({
+        # Set up dedicated learners
+        "num_learners": 5,                          # Use 5 dedicated learner processes
+        "num_gpus_per_learner": 1.0,                # Each learner gets a full GPU
+        "num_gpus": 1.0,                            # Driver only needs 1 GPU
+        "num_gpus_per_env_runner": 0.0,             # Don't allocate GPUs to workers with learner API
+        
+        # Optimize data flow to learners
+        "num_aggregator_actors_per_learner": 3,     # More aggregators = faster data feeding
+        "max_requests_in_flight_per_learner": 3,    # Allow multiple batches in flight
+        
+        # Reduce CPU overhead
+        "torch_compile_learner": True,              # Use torch.compile() for faster training
+        "torch_compile_learner_dynamo_backend": "inductor",
+        
+        # Optimized GPU batch sizes
+        "train_batch_size": 131072,                 # Larger batch for more GPU utilization
+        "sgd_minibatch_size": 16384,                # Larger minibatch for better GPU saturation
+        "num_sgd_iter": 3,                          # Fewer SGD iterations per batch 
+        "num_epochs": 3,                            # Fewer epochs for faster training
+        
+        # Memory optimization
+        "simple_optimizer": True,                   # Use simple optimizer for better memory usage
+    })
+    
+    print("\n===== Multi-GPU Learner Configuration =====")
+    print(f"Distributed training across {config['num_learners']} dedicated learners")
+    print(f"GPUs: 1 (driver) + {config['num_learners']}*1.0 (learners) = {1 + config['num_learners']}")
+    print(f"Each learner gets 1 full GPU for maximum throughput")
+    print(f"Workers will focus on data collection (no GPUs allocated)")
+    print("===========================================\n")
+    
     analysis = tune.run(
         "PPO",
         stop={"training_iteration": args.max_iterations},
