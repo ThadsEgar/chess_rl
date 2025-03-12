@@ -17,7 +17,6 @@ from ray import tune
 from ray.rllib.algorithms.ppo import PPO
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
-from ray.rllib.core.rl_module.rl_module import RLModuleConfig
 from ray.rllib.models import ModelCatalog
 from ray.rllib.utils.framework import try_import_torch
 
@@ -30,12 +29,12 @@ torch, nn = try_import_torch()
 class ChessMaskedRLModule(TorchRLModule):
     """Custom RLModule for Chess that supports action masking - compatible with the new RLlib API stack"""
     
-    def __init__(self, config: RLModuleConfig):
-        super().__init__(config)
+    def __init__(self, observation_space=None, action_space=None, inference_only=False, learner_only=False, model_config=None):
+        super().__init__(observation_space=observation_space, action_space=action_space, 
+                         inference_only=inference_only, learner_only=learner_only, model_config=model_config)
         
-        # Get spaces from config
-        obs_space = config.observation_space
-        action_space = config.action_space
+        # Get spaces
+        obs_space = observation_space
         
         # Print observation space details for debugging
         print(f"Initializing ChessMaskedRLModule with observation space: {obs_space}")
@@ -87,7 +86,7 @@ class ChessMaskedRLModule(TorchRLModule):
         self.timesteps = 0  # Track timesteps for epsilon decay
         
         # Check if we're in evaluation mode from model config
-        model_config_dict = config.module_config if hasattr(config, "module_config") else {}
+        model_config_dict = model_config or {}
         if model_config_dict.get("evaluation_mode", False):
             self.random_exploration = False
             print("Model initialized in evaluation mode, exploration disabled")
@@ -609,9 +608,10 @@ def train(args):
         # Model configuration
         "module": {
             "_target_": ChessMaskedRLModule,
-            "module_config": {
+            "model_config": {
                 "handle_missing_action_mask": True,
-                "no_final_linear": True  # Prevent RLlib from adding extra layers
+                "no_final_linear": True,  # Prevent RLlib from adding extra layers
+                "evaluation_mode": False  # Explicitly set training mode
             }
         },
         
@@ -712,7 +712,7 @@ def evaluate(args):
         # Use RLModule API instead of custom_model
         "module": {
             "_target_": ChessMaskedRLModule,
-            "module_config": {
+            "model_config": {
                 "evaluation_mode": True  # Explicitly use evaluation mode (disables exploration)
             }
         },
