@@ -737,7 +737,7 @@ def train(args):
         ray.init(
             address="auto" if args.distributed else None,
             ignore_reinit_error=True,
-            include_dashboard=args.dashboard
+            include_dashboard=args.dashboard,
             num_cpus=128,
         )
     
