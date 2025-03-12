@@ -757,8 +757,8 @@ def train(args):
     # - 20 workers with 4 CPUs each
     driver_gpus = 2           # Fixed at 3 GPUs for driver
     worker_gpus = 4           # Fixed at 3 GPUs for workers
-    num_workers = 20          # Fixed at 20 workers
-    cpus_per_worker = 4       # Fixed at 4 CPUs per worker
+    num_workers = 10          # Fixed at 20 workers
+    cpus_per_worker = 8       # Fixed at 4 CPUs per worker
     driver_cpus = 8           # Fixed at 8 CPUs for driver
     num_envs = 8              # Environments per worker
     
@@ -853,7 +853,7 @@ def train(args):
         "preprocessor_pref": None,
         "_disable_preprocessor_api": True,
         "observation_filter": "NoFilter",
-        "compress_observations": False,
+        "compress_observations": True,
         
         # Training parameters
         "train_batch_size": int(train_batch_size),  # Ensure integer
