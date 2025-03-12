@@ -706,7 +706,7 @@ def evaluate(args):
     # Create a proper RLModuleSpec instance for evaluation
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
-        model_config_dict={"evaluation_mode": True}
+        model_config={"evaluation_mode": True}
     )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
