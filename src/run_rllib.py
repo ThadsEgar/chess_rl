@@ -758,7 +758,7 @@ def train(args):
     driver_gpus = 2           # Fixed at 3 GPUs for driver
     worker_gpus = 4           # Fixed at 3 GPUs for workers
     num_workers = 10          # Fixed at 20 workers
-    cpus_per_worker = 10       # Fixed at 4 CPUs per worker
+    cpus_per_worker = 9       # Fixed at 4 CPUs per worker
     driver_cpus = 10       # Fixed at 8 CPUs for driver
     num_envs = 10            # Environments per worker
     
