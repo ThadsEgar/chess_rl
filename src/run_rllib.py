@@ -370,7 +370,10 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             self.random_exploration = False
         
         # Get the device from the input tensors
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(input_dict.get("obs", {}), dict) and "board" in input_dict["obs"] and hasattr(input_dict["obs"]["board"], "device"):
+            device = input_dict["obs"]["board"].device
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Extract observation
         if "obs" in input_dict:
@@ -409,6 +412,9 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
         # Process through CNN feature extractor
         features = self.features_extractor(board)
         
+        # Add small epsilon to features to avoid NaN issues
+        features = features + 1e-8
+        
         # Get raw action outputs (logits)
         action_logits = self.policy_head(features)
         
@@ -425,10 +431,11 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
             if isinstance(action_mask, np.ndarray):
                 # Convert numpy array to torch tensor
                 action_mask_tensor = torch.FloatTensor(action_mask).to(device)
-                inf_mask = torch.clamp(1 - action_mask_tensor, min=0, max=1) * -FLOAT_MAX
+                # Use -1000 instead of -FLOAT_MAX for better numerical stability
+                inf_mask = torch.clamp(1 - action_mask_tensor, min=0, max=1) * -1000.0
             else:
                 # Already a torch tensor
-                inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -FLOAT_MAX
+                inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
             
             # Apply the mask to the logits
             masked_logits = action_logits + inf_mask
@@ -453,9 +460,12 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                             # Choose a random legal action
                             random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,), device=device)].item()
                             
-                            # Set logits to favor this random action
-                            masked_logits[i] = torch.full_like(masked_logits[i], -10.0)
-                            masked_logits[i, random_action_idx] = 10.0
+                            # Use smaller values for more numerical stability (5.0 instead of 10.0)
+                            masked_logits[i] = torch.full_like(masked_logits[i], -5.0)
+                            masked_logits[i, random_action_idx] = 5.0
+            
+            # Apply gradient clipping to logits
+            masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
             
             # If we temporarily disabled exploration, restore it
             if inference_mode:
@@ -463,7 +473,9 @@ class ChessMaskedModel(TorchModelV2, nn.Module):
                 
             return masked_logits, state
         
-        # If no action mask available, return unmasked logits
+        # If no action mask available, return unmasked logits (with clipping)
+        action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
+        
         # If we temporarily disabled exploration, restore it
         if inference_mode:
             self.random_exploration = original_exploration
@@ -775,11 +787,14 @@ def train(args):
         "train_batch_size": 32768,
         "sgd_minibatch_size": 4096,
         "num_sgd_iter": 5,
-        "lr": 3e-4,
+        "lr": 1e-4,  # Reduced from 3e-4 for numerical stability
         "callbacks": ChessMetricsCallback,
         "create_env_on_driver": True,
         "compress_observations": True,
         "log_level": "INFO",  # Debug startup
+        
+        # Gradient clipping to prevent NaN issues
+        "grad_clip": 1.0,
         
         # Zero-sum game specific settings
         "gamma": 1.0,  # No temporal discounting for chess (outcome only matters at end)
