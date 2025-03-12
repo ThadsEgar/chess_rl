@@ -171,11 +171,13 @@ class ChessMaskedRLModule(TorchRLModule):
         if isinstance(batch, dict) and "board" in batch:
             board = batch["board"]
             action_mask = batch["action_mask"]
+            print(f"Inference with dict batch: board shape={board.shape}, action_mask shape={action_mask.shape}")
         else:
             # Handle non-dict inputs (should be rare with the wrapper)
             device = next(self.parameters()).device
             # Create a default batch size of 1 if batch is not a tensor with shape
             batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
+            print(f"Inference with non-dict batch: type={type(batch)}, batch_size={batch_size}")
             board = torch.zeros((batch_size, 13, 8, 8), device=device)
             action_mask = torch.zeros((batch_size, 20480), device=device)
         
@@ -214,11 +216,13 @@ class ChessMaskedRLModule(TorchRLModule):
         if isinstance(batch, dict) and "board" in batch:
             board = batch["board"]
             action_mask = batch["action_mask"]
+            print(f"Exploration with dict batch: board shape={board.shape}, action_mask shape={action_mask.shape}")
         else:
             # Handle non-dict inputs (should be rare with the wrapper)
             device = next(self.parameters()).device
             # Create a default batch size of 1 if batch is not a tensor with shape
             batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
+            print(f"Exploration with non-dict batch: type={type(batch)}, batch_size={batch_size}")
             board = torch.zeros((batch_size, 13, 8, 8), device=device)
             action_mask = torch.zeros((batch_size, 20480), device=device)
         
@@ -648,7 +652,9 @@ def train(args):
         "sgd_minibatch_size": 16384,
         "lr": 5e-5,
         "grad_clip": 1.0,
-        "entropy_coeff": args.entropy_coeff
+        "entropy_coeff": args.entropy_coeff,
+        "sample_timeout_s": 20,  # Increase timeout to 5 minutes
+        "callbacks": ChessMetricsCallback,  # Add metrics callback
     }
     
     # Create a proper RLModuleSpec instance
