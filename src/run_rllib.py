@@ -747,12 +747,14 @@ def train(args):
             ignore_reinit_error=True, 
             include_dashboard=args.dashboard,
             _redis_password=args.redis_password,
+            num_cpus=118,
         )
     else:
         ray.init(
             address="auto" if args.distributed else None,
             ignore_reinit_error=True,
             include_dashboard=args.dashboard,
+            num_cpus=118,
         )
     
     # Hardware configuration - using fixed allocation as requested
