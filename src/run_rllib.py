@@ -5,9 +5,6 @@ This implementation uses RLlib's built-in distributed training capabilities.
 """
 # Import custom environment
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
-
-torch, nn = try_import_torch()
-
 # Import RLModule for the new API stack
 import os
 import argparse
