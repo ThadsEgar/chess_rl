@@ -755,10 +755,10 @@ def train(args):
     # Fixed resource allocation as requested:
     # - 3:3 GPU split
     # - 20 workers with 4 CPUs each
-    driver_gpus = 1           # Fixed at 3 GPUs for driver
-    worker_gpus = 4.999          # Fixed at 3 GPUs for ivworkers
+    driver_gpus = 4          # Fixed at 3 GPUs for driver
+    worker_gpus = 1.999         # Fixed at 3 GPUs for ivworkers
     num_workers = 20          # Fixed at 20 workers
-    cpus_per_worker = 5       # Fixed at 4 CPUs per worker
+    cpus_per_worker = 4       # Fixed at 4 CPUs per worker
     driver_cpus = 16       # Fixed at 8 CPUs for driver
     num_envs = 8            # Environments per worker
     
@@ -782,8 +782,8 @@ def train(args):
         gpus_per_worker = 0
     
     # Use fixed batch sizes
-    train_batch_size = 32768
-    sgd_minibatch_size = 4096
+    train_batch_size = 32768 * 4
+    sgd_minibatch_size = 4096 * 4
     
     total_cpu_request = driver_cpus + (cpus_per_worker * num_workers)
     print(f"CPU allocation: {driver_cpus} (driver) + {cpus_per_worker}*{num_workers} (workers) = {total_cpu_request}")
