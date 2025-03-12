@@ -750,8 +750,8 @@ def train(args):
     total_cpus = 128
     
     # Resource allocation - adjusted for 3.0/3.0 GPU split
-    driver_cpus = 16  # Increased from 10 to utilize additional CPU cores
-    num_workers = 20  # Increased from 16 to utilize additional CPU cores
+    driver_cpus = 24  # Increased from 10 to utilize additional CPU cores
+    num_workers = 24  # Increased from 16 to utilize additional CPU cores
     cpus_per_worker = 4  # Increased from 4 for better processing
     num_envs = 8  # Increased environments per worker for better parallelism
     
@@ -843,11 +843,6 @@ def train(args):
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
         
-        # Use StochasticSampling for exploration
-        "exploration_config": {
-            "type": "StochasticSampling",
-        },
-        
         # Memory optimization for efficient GPU memory usage
         "_disable_preprocessor_api": False,
         "rollout_fragment_length": 1200,  # Increased for better GPU utilization with more CPUs
@@ -919,9 +914,6 @@ def evaluate(args):
         },
         # Critical: Ensure we're using deterministic actions (no exploration)
         "explore": False,
-        "exploration_config": {
-            "type": "StochasticSampling",
-        },
     }
     
     print(f"Loading checkpoint from: {args.checkpoint}")
