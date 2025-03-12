@@ -774,7 +774,7 @@ def train(args):
             gpus_per_worker = worker_gpus / num_workers
             
             # Round to 2 decimal places to avoid floating point issues
-            gpus_per_worker = .4
+            gpus_per_worker = round(worker_gpus / num_workers, 2)
         else:
             # If GPUs > workers, each worker gets at least 1 GPU
             gpus_per_worker = worker_gpus // num_workers
