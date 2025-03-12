@@ -837,10 +837,10 @@ def train(args):
         # Resource allocation - use whole numbers as requested
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
-        "num_cpus_per_worker": cpus_per_worker,
+        "num_cpus_per_env_runner": cpus_per_worker,
         "num_gpus": driver_gpus,
-        "num_gpus_per_worker": gpus_per_worker,
-        "num_envs_per_worker": num_envs,
+        "num_gpus_per_env_runner": gpus_per_worker,
+        "num_envs_per_env_runner": num_envs,
         
         # Model configuration
         "model": {
