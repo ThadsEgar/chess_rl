@@ -825,7 +825,18 @@ def train(args):
     print(f"This will encourage the agent to explore diverse moves early and exploit its knowledge later.")
     print(f"================================\n")
     
-    # Optimize configuration with fixed resource allocation
+    # Set up checkpoint restoration if provided
+    restore_path = None
+    if args.checkpoint:
+        # Validate checkpoint path
+        if os.path.exists(args.checkpoint):
+            restore_path = args.checkpoint
+            print(f"Will restore from checkpoint: {restore_path}")
+        else:
+            print(f"Warning: Checkpoint path {args.checkpoint} does not exist. Starting fresh.")
+
+    # Modify config to use learner API properly with all GPUs
+    # Reassign GPU resources - crucial for fixing utilization
     config = {
         "env": "chess_env",
         "framework": "torch",
@@ -838,8 +849,8 @@ def train(args):
         "num_cpus_for_driver": driver_cpus,
         "num_workers": num_workers,
         "num_cpus_per_env_runner": cpus_per_worker,
-        "num_gpus": driver_gpus,
-        "num_gpus_per_env_runner": gpus_per_worker,
+        "num_gpus": 1.0,                           # Driver only needs 1 GPU
+        "num_gpus_per_env_runner": 0.0,            # Workers don't need GPUs with learner API
         "num_envs_per_env_runner": num_envs,
         
         # Model configuration
@@ -859,8 +870,8 @@ def train(args):
         "train_batch_size": int(train_batch_size),  # Ensure integer
         "sgd_minibatch_size": int(sgd_minibatch_size),  # Ensure integer
         "mini_batch_size": int(sgd_minibatch_size),
-        "num_sgd_iter": 5,
-        "num_epochs": 5,
+        "num_sgd_iter": 3,                         # Reduce iteration count for faster training
+        "num_epochs": 3,                            # Fewer epochs for faster training
         "lr": 5e-5,  # Reduced for numerical stability
         "callbacks": ChessMetricsCallback,
         "create_env_on_driver": False,  # Disable environment on driver to save resources
@@ -891,49 +902,26 @@ def train(args):
             [args.max_iterations * 0.5, args.entropy_coeff * 0.5],  # Halfway through, halve the coefficient
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
+        
+        # Optional but helpful performance improvements
+        "simple_optimizer": True,                  # Better memory utilization
     }
 
-    # Set up checkpoint restoration if provided
-    restore_path = None
-    if args.checkpoint:
-        # Validate checkpoint path
-        if os.path.exists(args.checkpoint):
-            restore_path = args.checkpoint
-            print(f"Will restore from checkpoint: {restore_path}")
-        else:
-            print(f"Warning: Checkpoint path {args.checkpoint} does not exist. Starting fresh.")
-
-    # Enable true multi-GPU training with the learner API
-    config.update({
-        # Set up dedicated learners
-        "num_learners": 5,                          # Use 5 dedicated learner processes
-        "num_gpus_per_learner": 1.0,                # Each learner gets a full GPU
-        "num_gpus": 0.99999,                            # Driver only needs 1 GPU
-        "num_gpus_per_env_runner": 0.0,             # Don't allocate GPUs to workers with learner API
-        
-        # Optimize data flow to learners
-        "num_aggregator_actors_per_learner": 3,     # More aggregators = faster data feeding
-        "max_requests_in_flight_per_learner": 3,    # Allow multiple batches in flight
-        
-        # Reduce CPU overhead
-        "torch_compile_learner": True,              # Use torch.compile() for faster training
-        "torch_compile_learner_dynamo_backend": "inductor",
-        
-        # Optimized GPU batch sizes
-        "train_batch_size": 131072,                 # Larger batch for more GPU utilization
-        "sgd_minibatch_size": 16384,                # Larger minibatch for better GPU saturation
-        "num_sgd_iter": 3,                          # Fewer SGD iterations per batch 
-        "num_epochs": 3,                            # Fewer epochs for faster training
-        
-        # Memory optimization
-        "simple_optimizer": True,                   # Use simple optimizer for better memory usage
-    })
+    # Modify config to use learner API properly with all GPUs
+    # Reassign GPU resources - crucial for fixing utilization
+    config["num_gpus"] = 1.0                           # Driver only needs 1 GPU
+    config["num_gpus_per_env_runner"] = 0.0            # Workers don't need GPUs with learner API
+    config["num_learners"] = 5                         # Use 5 dedicated learner processes (1 per GPU)
+    config["num_gpus_per_learner"] = 1.0               # Each learner gets 1 full GPU
+    config["num_aggregator_actors_per_learner"] = 2    # Optimize data flow to learners
+    
+    # Optional but helpful performance improvements
+    config["simple_optimizer"] = True                  # Better memory utilization
+    config["num_sgd_iter"] = 3                         # Reduce iteration count for faster training
     
     print("\n===== Multi-GPU Learner Configuration =====")
-    print(f"Distributed training across {config['num_learners']} dedicated learners")
-    print(f"GPUs: 1 (driver) + {config['num_learners']}*1.0 (learners) = {1 + config['num_learners']}")
-    print(f"Each learner gets 1 full GPU for maximum throughput")
-    print(f"Workers will focus on data collection (no GPUs allocated)")
+    print(f"Redistributed GPUs: 1 (driver) + 5 (learners, 1.0 each)")
+    print(f"Workers will focus on data collection without GPU allocation")
     print("===========================================\n")
     
     analysis = tune.run(
