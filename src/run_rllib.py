@@ -830,8 +830,8 @@ def train(args):
         "env": "chess_env",
         "framework": "torch",
         "disable_env_checking": True,
-        "_enable_rl_module_api": False,
-        "_enable_learner_api": False,
+        "_enable_rl_module_api": True,
+        "_enable_learner_api": True,
         "enable_rl_module_and_learner": False,
         
         # Resource allocation - use whole numbers as requested
@@ -1017,7 +1017,7 @@ def main():
     parser = argparse.ArgumentParser(description="Chess RL training using RLlib")
     parser.add_argument("--mode", choices=["train", "eval"], default="train", 
                         help="Mode: train or evaluate")
-    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", 
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda", 
                         help="Device to use (cpu or cuda)")
     parser.add_argument("--checkpoint", type=str, default=None, 
                         help="Path to checkpoint to load")
