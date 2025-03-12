@@ -712,12 +712,30 @@ def train(args):
             [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
         ],
         
+        # Add epsilon-greedy exploration for occasional random moves
+        "exploration_config": {
+            "type": "EpsilonGreedy",
+            "initial_epsilon": 0.1,    # Start with 10% random actions
+            "final_epsilon": 0.5,     # End with 5% random actions (1/20 moves)
+            "epsilon_timesteps": 20_000_000,  # Decay over 20M timesteps
+        },
+        
         # Memory optimization for lower GPU memory usage
         "_disable_preprocessor_api": False,
         "rollout_fragment_length": "auto",  # Optimize fragment length
         "_use_trajectory_view_api": True,  # More memory-efficient view
         "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
     }
+
+    # Set up checkpoint restoration if provided
+    restore_path = None
+    if args.checkpoint:
+        # Validate checkpoint path
+        if os.path.exists(args.checkpoint):
+            restore_path = args.checkpoint
+            print(f"Will restore from checkpoint: {restore_path}")
+        else:
+            print(f"Warning: Checkpoint path {args.checkpoint} does not exist. Starting fresh.")
 
     analysis = tune.run(
         "PPO",
@@ -729,6 +747,7 @@ def train(args):
         metric="episode_reward_mean",
         mode="max",
         resume="AUTO",  # AUTO mode: resume if checkpoint exists, otherwise start fresh
+        restore=restore_path,  # Add this for restoring from specific checkpoint
         config=config,
     )
     
@@ -777,7 +796,7 @@ def main():
                         help="Render environment during evaluation")
     parser.add_argument("--inference_mode", choices=["cpu", "gpu"], default="gpu", 
                         help="Inference mode: cpu or gpu")
-    parser.add_argument("--entropy_coeff", type=float, default=0.01, 
+    parser.add_argument("--entropy_coeff", type=float, default=0.05, 
                         help="Entropy coefficient for PPO")
     
     args = parser.parse_args()
