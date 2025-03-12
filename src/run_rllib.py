@@ -846,7 +846,7 @@ def train(args):
         
         # Memory optimization for efficient GPU memory usage
         "_disable_preprocessor_api": False,
-        "rollout_fragment_length": 1200,  # Increased for better GPU utilization with more CPUs
+        "rollout_fragment_length": "auto",  # Increased for better GPU utilization with more CPUs
         "_use_trajectory_view_api": True,
         "shuffle_buffer_size": 0,  # Disable shuffle buffer to save memory
     }
