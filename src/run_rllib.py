@@ -655,11 +655,6 @@ def train(args):
         
         # Entropy settings to encourage exploration
         "entropy_coeff": args.entropy_coeff,  # Add entropy bonus for exploration
-        "entropy_coeff_schedule": [
-            [0, args.entropy_coeff],  # Start with the specified coefficient
-            [args.max_iterations * 0.5, args.entropy_coeff * 0.5],  # Halfway through, halve the coefficient
-            [args.max_iterations, args.entropy_coeff * 0.1],  # By the end, reduce to 10% of original
-        ],
         
         # Optional but helpful performance improvements
         "simple_optimizer": True,                  # Better memory utilization
