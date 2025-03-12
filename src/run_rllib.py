@@ -28,19 +28,19 @@ torch, nn = try_import_torch()
 
 
 class ChessMetricsCallback(DefaultCallbacks):
-    """Callback to track chess-specific metrics during training"""
-    
-    def on_episode_end(self, *, worker=None, base_env=None, policies=None, episode=None, env_index=None, **kwargs):
-        """Called at the end of an episode"""
-        # Skip if episode is None (can happen in some edge cases)
-        if episode is None:
-            return
-            
-        # Extract game outcome from info
-        info = episode.last_info_for()
-        if info and "outcome" in info:
+    def on_episode_end(
+        self,
+        *,
+        worker: None,
+        base_env: None,
+        policies: None,
+        episode: None,
+        **kwargs
+    ) -> None:
+        # Access the last info dictionary from the episode
+        info = episode.infos[-1]  # Replace episode.last_info_for() with this
+        if "outcome" in info:
             outcome = info["outcome"]
-            # Record metrics based on outcome
             if outcome == "white_win":
                 episode.custom_metrics["white_win"] = 1.0
                 episode.custom_metrics["black_win"] = 0.0
