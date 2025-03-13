@@ -580,7 +580,7 @@ def train(args):
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 10,  # Increase timeout to 20 seconds
+        "sample_timeout_s": 120,  # Increase timeout to 20 seconds
         "rollout_fragment_length": "auto",  # Reduce fragment length for faster sampling
         "num_envs_per_env_runner": 4,  # Use a single environment per worker
         "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
