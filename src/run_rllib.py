@@ -566,7 +566,7 @@ def train(args):
     config = {
         "env": "chess_env",
         "framework": "torch",
-        "disable_env_checking": True,
+        "disable_env_checking": False,
         "_enable_rl_module_api": True,
         "_enable_learner_api": True,
         "num_workers": 12,
@@ -578,11 +578,16 @@ def train(args):
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 120,  # Increase timeout to 20 seconds
-        "rollout_fragment_length": "auto",  # Reduce fragment length for faster sampling
-        "num_envs_per_env_runner": 4,  # Use a single environment per worker
-        "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
-        "callbacks": ChessMetricsCallback,  # Add metrics callback
+        "sample_timeout_s": 120,
+        "rollout_fragment_length": "auto",
+        "num_envs_per_env_runner": 4,
+        "batch_mode": "truncate_episodes",
+        "callbacks": ChessMetricsCallback,
+        # Add these for advantage computation
+        "use_gae": True,           # Enable Generalized Advantage Estimation
+        "lambda": 0.95,            # GAE lambda parameter
+        "vf_clip_param": 10.0,     # Clip value function loss (optional but recommended)
+        "vf_loss_coeff": 1.0,      # Weight for value function loss
     }
     
     # Define the observation space
