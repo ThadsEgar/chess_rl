@@ -31,14 +31,15 @@ class ChessMetricsCallback(DefaultCallbacks):
     def on_episode_end(
         self,
         *,
-        worker: None,
-        base_env: None,
-        policies: None,
-        episode: None,
+        worker,           # Typically a RolloutWorker
+        base_env,         # Typically a BaseEnv
+        policies,         # Typically a Dict[str, Policy]
+        episode,          # Typically an Episode object
+        env_index=None,   # Optional, may be passed in some contexts
         **kwargs
     ) -> None:
         # Access the last info dictionary from the episode
-        info = episode.infos[-1]  # Replace episode.last_info_for() with this
+        info = episode.infos[-1]  # Your current approach
         if "outcome" in info:
             outcome = info["outcome"]
             if outcome == "white_win":
