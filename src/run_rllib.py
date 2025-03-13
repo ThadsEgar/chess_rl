@@ -578,16 +578,27 @@ def train(args):
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 120,
-        "rollout_fragment_length": "auto",
-        "num_envs_per_env_runner": 4,
-        "batch_mode": "truncate_episodes",
-        "callbacks": ChessMetricsCallback,
-        # Add these for advantage computation
-        "use_gae": True,           # Enable Generalized Advantage Estimation
-        "lambda": 0.95,            # GAE lambda parameter
-        "vf_clip_param": 10.0,     # Clip value function loss (optional but recommended)
-        "vf_loss_coeff": 1.0,      # Weight for value function loss
+        "sample_timeout_s": 600,  # Increase timeout to 10 minutes
+        "rollout_fragment_length": "auto",  # Reduce fragment length for faster sampling
+        "num_envs_per_env_runner": 4,  # Use a single environment per worker
+        "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
+        "callbacks": ChessMetricsCallback,  # Add metrics callback
+        
+        # Add PPO-specific parameters for advantage calculation
+        "gamma": 0.99,  # Discount factor
+        "lambda": 0.95,  # GAE lambda parameter
+        "use_gae": True,  # Use Generalized Advantage Estimation
+        "vf_loss_coeff": 0.5,  # Value function loss coefficient
+        "kl_coeff": 0.2,  # Initial KL coefficient
+        "clip_param": 0.2,  # PPO clip parameter
+        "num_sgd_iter": 10,  # Number of SGD iterations
+        
+        # Postprocessing config to ensure advantages are calculated
+        "postprocess_inputs": True,  # Enable postprocessing
+        "_enable_new_api_stack": True,  # Enable new API stack
+        "_tf_policy_handles_more_than_one_loss": True,  # Handle multiple losses
+        "_disable_action_flattening": True,  # Don't flatten actions
+        "_disable_preprocessor_api": True,  # Disable old preprocessor API
     }
     
     # Define the observation space
