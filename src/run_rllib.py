@@ -75,6 +75,13 @@ class ChessMetricsCallback(DefaultCallbacks):
                 elif reason == "stalemate":
                     metrics["stalemate"] = 1.0
                 # ... other reasons ...
+                
+        if hasattr(episode, 'last_batch'):
+            print(f"Episode batch keys: {episode.last_batch.keys()}")
+        elif hasattr(episode, 'batch'):
+            print(f"Episode batch keys: {episode.batch.keys()}")
+        else:
+            print(episode)            
 
         # Optionally log to metrics_logger if available
         if metrics_logger:
@@ -182,17 +189,24 @@ class ChessMaskedRLModule(TorchRLModule):
     
     def _forward_inference(self, batch):
         """Forward pass for inference (no exploration)"""
-        # Extract tensor components
-        if isinstance(batch, dict) and "board" in batch:
-            board = batch["board"]
-            action_mask = batch["action_mask"]
-            print(f"Inference with dict batch: board shape={board.shape}, action_mask shape={action_mask.shape}")
+        # Check if batch has 'obs' key (new RLlib format)
+        if isinstance(batch, dict) and 'obs' in batch:
+            # Extract observation from batch
+            obs = batch['obs']
+            if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
+                board = obs['board']
+                action_mask = obs['action_mask']
+            else:
+                raise ValueError(f"Expected 'obs' to be a dict with 'board' and 'action_mask', got {type(obs)}")
+        # Direct dict format (old format)
+        elif isinstance(batch, dict) and 'board' in batch and 'action_mask' in batch:
+            board = batch['board']
+            action_mask = batch['action_mask']
         else:
             # Handle non-dict inputs (should be rare with the wrapper)
             device = next(self.parameters()).device
             # Create a default batch size of 1 if batch is not a tensor with shape
             batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
-            print(f"Inference with non-dict batch: type={type(batch)}, batch_size={batch_size}")
             board = torch.zeros((batch_size, 13, 8, 8), device=device)
             action_mask = torch.zeros((batch_size, 20480), device=device)
         
@@ -205,6 +219,7 @@ class ChessMaskedRLModule(TorchRLModule):
             
         # Get batch size from board tensor
         batch_size = board.shape[0]
+        device = board.device
         
         # Process through CNN feature extractor
         features = self.features_extractor(board)
@@ -212,39 +227,34 @@ class ChessMaskedRLModule(TorchRLModule):
         # Add small epsilon to features to avoid NaN issues
         features = features + 1e-8
         
-        # Get raw action outputs (logits)
+        # Get raw action outputs (logits) and value estimates
         action_logits = self.policy_head(features)
+        value = self.value_head(features)
         
         # Apply action mask by setting illegal actions to a large negative number
-        if action_mask is not None:
-            # Apply the mask to the logits
-            inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
-            masked_logits = action_logits + inf_mask
+        inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
+        masked_logits = action_logits + inf_mask
             
-            # Apply gradient clipping to logits
-            masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
-            
-            # Get the most likely action (for deterministic policy)
-            actions = torch.argmax(masked_logits, dim=-1)
-            
-            # Print shapes for debugging
-            print(f"Output shapes - masked_logits: {masked_logits.shape}, actions: {actions.shape}")
-            
-            return {
-                "action_dist_inputs": masked_logits,
-                "actions": actions
-            }
+        # Apply gradient clipping to logits
+        masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
         
-        # If no action mask available, return unmasked logits (with clipping)
-        action_logits = torch.clamp(action_logits, min=-50.0, max=50.0)
-        actions = torch.argmax(action_logits, dim=-1)
+        # Get the most likely action (for deterministic policy)
+        actions = torch.argmax(masked_logits, dim=-1)
         
-        # Print shapes for debugging
-        print(f"Output shapes - action_logits: {action_logits.shape}, actions: {actions.shape}")
-            
+        # Ensure correct shape for value function output
+        value = value.view(batch_size, 1)
+        
+        # Return output in the format expected by PPO
+        # CRITICAL: use the same key names as _forward_exploration for consistency
         return {
-            "action_dist_inputs": action_logits,
-            "actions": actions
+            # Required by PPO's action distribution
+            "action_dist_inputs": masked_logits,  # For PPO's policy distribution
+            
+            # Required by both training and inference pathways
+            "actions": actions,                  # Selected actions
+            
+            # Required for value function in PPO
+            "vf_preds": value,                   # State value predictions
         }
     
     def _forward_exploration(self, batch, **kwargs):
@@ -264,14 +274,19 @@ class ChessMaskedRLModule(TorchRLModule):
         if board.shape[1:] != (13, 8, 8) or action_mask.shape[1:] != (20480,):
             raise ValueError(f"Unexpected shapes: board={board.shape}, action_mask={action_mask.shape}")
 
+        # Get features from CNN
         features = self.features_extractor(board)
         features = features + 1e-8
+        
+        # Get policy logits and value estimates
         action_logits = self.policy_head(features)
         value = self.value_head(features)
 
+        # Apply action mask by setting illegal moves to large negative values
         inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
         masked_logits = action_logits + inf_mask
 
+        # Apply exploration if enabled
         if self.random_exploration:
             self.update_epsilon()
             random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
@@ -284,12 +299,26 @@ class ChessMaskedRLModule(TorchRLModule):
                     masked_logits[i] = torch.full_like(masked_logits[i], -5.0)
                     masked_logits[i, random_action_idx] = 5.0
 
+        # Apply gradient clipping to logits
         masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
-        value = value.view(batch_size, 1)  # Ensure value matches batch size
+        
+        # Get actions based on logits
+        actions = torch.argmax(masked_logits, dim=-1)
+        
+        # Ensure correct shape for value function output
+        value = value.view(batch_size, 1)
 
+        # Return output in the format expected by PPO
+        # CRITICAL: these key names must match what PPO expects
         return {
-            "action_dist_inputs": masked_logits,  # Changed from 'action_dist'
-            "vf": value,
+            # Required by PPO's action distribution
+            "action_dist_inputs": masked_logits,  # For PPO's policy distribution
+            
+            # Required by both training and inference pathways
+            "actions": actions,                  # Selected actions
+            
+            # Required for value function in PPO
+            "vf_preds": value,                   # State value predictions (renamed from "vf")
         }
     
     def forward(self, batch, **kwargs):
