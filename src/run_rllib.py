@@ -76,8 +76,6 @@ class ChessMetricsCallback(DefaultCallbacks):
                     metrics["stalemate"] = 1.0
                 # ... other reasons ...
 
-        episode.user_data["metrics"] = metrics
-
         # Optionally log to metrics_logger if available
         if metrics_logger:
             for key, value in metrics.items():
