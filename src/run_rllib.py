@@ -609,7 +609,7 @@ def train(args):
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
         "sample_timeout_s": 600,  # 10 minute timeout
-        "rollout_fragment_length": 128,  # Smaller fragments for faster iteration
+        "rollout_fragment_length": "auto",  # Smaller fragments for faster iteration
         "num_envs_per_env_runner": 4,
         "batch_mode": "truncate_episodes",
         "callbacks": ChessMetricsCallback,
