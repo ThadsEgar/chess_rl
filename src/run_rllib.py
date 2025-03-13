@@ -23,6 +23,14 @@ from ray.rllib.utils.framework import try_import_torch
 
 # Import custom environment
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
+from typing import TYPE_CHECKING, Dict, Optional, Union
+from ray.rllib.core.rl_module.rl_module import RLModule
+from ray.rllib.env.base_env import BaseEnv
+from ray.rllib.evaluation.episode_v2 import EpisodeV2
+from ray.rllib.policy import Policy
+from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
+from ray.rllib.utils.typing import AgentID, EnvType, EpisodeType, PolicyID
+
 
 torch, nn = try_import_torch()
 
@@ -31,12 +39,16 @@ class ChessMetricsCallback(DefaultCallbacks):
     def on_episode_end(
         self,
         *,
-        worker,           # Typically a RolloutWorker
-        base_env,         # Typically a BaseEnv
-        policies,         # Typically a Dict[str, Policy]
-        episode,          # Typically an Episode object
-        env_index=None,   # Optional, may be passed in some contexts
-        **kwargs
+        episode: Union[EpisodeType, EpisodeV2],
+        env_runner: Optional["EnvRunner"] = None,
+        metrics_logger: Optional[MetricsLogger] = None,
+        env: Optional[gym.Env] = None,
+        env_index: int,
+        rl_module: Optional[RLModule] = None,
+        worker: Optional["EnvRunner"] = None,
+        base_env: Optional[BaseEnv] = None,
+        policies: Optional[Dict[PolicyID, Policy]] = None,
+        **kwargs,
     ) -> None:
         # Access the last info dictionary from the episode
         info = episode.infos[-1]  # Your current approach
