@@ -595,39 +595,55 @@ def train(args):
     config = {
         "env": "chess_env",
         "framework": "torch",
-        "disable_env_checking": False,
+        "disable_env_checking": True,
         "_enable_rl_module_api": True,
         "_enable_learner_api": True,
         "num_workers": 12,
         "num_cpus_per_env_runner": 4,
         "num_gpus_per_learner": 1.0,
         "num_learners": 4,
-        "train_batch_size": 2048,
-        "sgd_minibatch_size": 128,
+        "train_batch_size": 4096,
+        "sgd_minibatch_size": 256,
+        "num_sgd_iter": 10,
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 600,  # Increase timeout to 10 minutes
-        "rollout_fragment_length": "auto",  # Reduce fragment length for faster sampling
-        "num_envs_per_env_runner": 4,  # Use a single environment per worker
-        "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
-        "callbacks": ChessMetricsCallback,  # Add metrics callback
+        "sample_timeout_s": 600,  # 10 minute timeout
+        "rollout_fragment_length": 128,  # Smaller fragments for faster iteration
+        "num_envs_per_env_runner": 4,
+        "batch_mode": "truncate_episodes",
+        "callbacks": ChessMetricsCallback,
         
-        # Add PPO-specific parameters for advantage calculation
+        # PPO-specific parameters
         "gamma": 0.99,  # Discount factor
         "lambda": 0.95,  # GAE lambda parameter
         "use_gae": True,  # Use Generalized Advantage Estimation
         "vf_loss_coeff": 0.5,  # Value function loss coefficient
         "kl_coeff": 0.2,  # Initial KL coefficient
         "clip_param": 0.2,  # PPO clip parameter
-        "num_sgd_iter": 10,  # Number of SGD iterations
         
-        # Postprocessing config to ensure advantages are calculated
-        "postprocess_inputs": True,  # Enable postprocessing
-        "_enable_new_api_stack": True,  # Enable new API stack
-        "_tf_policy_handles_more_than_one_loss": True,  # Handle multiple losses
-        "_disable_action_flattening": True,  # Don't flatten actions
-        "_disable_preprocessor_api": True,  # Disable old preprocessor API
+        # Value bootstrapping - CRITICAL for advantage calculation
+        "vtrace": False,  # Don't use V-trace (not needed for PPO)
+        "vf_share_layers": False,  # Use separate value network
+        "normalize_actions": False,  # Don't normalize actions (chess is discrete)
+        
+        # Postprocessing
+        "preprocessor_pref": None,  # No preprocessor
+        "observation_filter": "NoFilter",  # No observation normalization
+        
+        # Critical settings for advantage calculation
+        "_tf_policy_handles_more_than_one_loss": True,
+        "model": {
+            "custom_model": None,  # Not using legacy ModelCatalog API
+            "vf_share_layers": False,  # Separate value function
+        },
+        
+        # Enable everything needed for new API stack
+        "_use_default_native_models": False,
+        "_disable_preprocessor_api": True,
+        "_disable_action_flattening": True,
+        "_enable_new_api_stack": True,
+        "simple_optimizer": True,  # Simpler optimizer, more stable
     }
     
     # Define the observation space
