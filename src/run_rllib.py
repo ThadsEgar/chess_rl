@@ -47,41 +47,41 @@ class ChessMetricsCallback(DefaultCallbacks):
         rl_module: Optional[RLModule] = None,
         worker: Optional["EnvRunner"] = None,
         base_env: Optional[BaseEnv] = None,
-        policies: Optional[Dict[PolicyID, Policy]] = None,
+        policies: Optional[Dict[str, "Policy"]] = None,
         **kwargs,
     ) -> None:
-        # Access the last info dictionary from the episode
-        info = episode.infos[-1]  # Your current approach
+        # Store metrics in user_data
+        metrics = {}
+        info = episode.infos[-1]
         if "outcome" in info:
             outcome = info["outcome"]
             if outcome == "white_win":
-                episode.custom_metrics["white_win"] = 1.0
-                episode.custom_metrics["black_win"] = 0.0
-                episode.custom_metrics["draw"] = 0.0
+                metrics["white_win"] = 1.0
+                metrics["black_win"] = 0.0
+                metrics["draw"] = 0.0
             elif outcome == "black_win":
-                episode.custom_metrics["white_win"] = 0.0
-                episode.custom_metrics["black_win"] = 1.0
-                episode.custom_metrics["draw"] = 0.0
+                metrics["white_win"] = 0.0
+                metrics["black_win"] = 1.0
+                metrics["draw"] = 0.0
             elif outcome == "draw":
-                episode.custom_metrics["white_win"] = 0.0
-                episode.custom_metrics["black_win"] = 0.0
-                episode.custom_metrics["draw"] = 1.0
-            
-            # Record termination reason if available
+                metrics["white_win"] = 0.0
+                metrics["black_win"] = 0.0
+                metrics["draw"] = 1.0
+
             if "termination_reason" in info:
                 reason = info["termination_reason"]
                 if reason == "checkmate":
-                    episode.custom_metrics["checkmate"] = 1.0
+                    metrics["checkmate"] = 1.0
                 elif reason == "stalemate":
-                    episode.custom_metrics["stalemate"] = 1.0
-                elif reason == "insufficient_material":
-                    episode.custom_metrics["insufficient_material"] = 1.0
-                elif reason == "fifty_moves":
-                    episode.custom_metrics["fifty_moves"] = 1.0
-                elif reason == "repetition":
-                    episode.custom_metrics["repetition"] = 1.0
-                elif reason == "move_limit_exceeded":
-                    episode.custom_metrics["move_limit_exceeded"] = 1.0
+                    metrics["stalemate"] = 1.0
+                # ... other reasons ...
+
+        episode.user_data["metrics"] = metrics
+
+        # Optionally log to metrics_logger if available
+        if metrics_logger:
+            for key, value in metrics.items():
+                metrics_logger.log_value(key, value)
 
 
 class ChessMaskedRLModule(TorchRLModule):
