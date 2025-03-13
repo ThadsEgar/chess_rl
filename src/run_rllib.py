@@ -20,7 +20,7 @@ from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.models import ModelCatalog
 from ray.rllib.utils.framework import try_import_torch
-
+from gymnasium import spaces
 # Import custom environment
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 from typing import TYPE_CHECKING, Dict, Optional, Union
@@ -575,17 +575,27 @@ def train(args):
         "num_cpus_per_env_runner": 4,
         "num_gpus_per_learner": 1.0,
         "num_learners": 4,
-        "train_batch_size": 16384,
-        "sgd_minibatch_size": 2048,
+        "train_batch_size": 4096,
+        "sgd_minibatch_size": 128,
         "lr": 5e-5,
         "grad_clip": 1.0,
         "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 600,  # Increase timeout to 20 seconds
+        "sample_timeout_s": 10,  # Increase timeout to 20 seconds
         "rollout_fragment_length": "auto",  # Reduce fragment length for faster sampling
         "num_envs_per_env_runner": 4,  # Use a single environment per worker
         "batch_mode": "truncate_episodes",  # Use truncated episodes for faster sampling
         "callbacks": ChessMetricsCallback,  # Add metrics callback
     }
+    
+    # Define the observation space
+    observation_space = spaces.Dict({
+        'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
+        'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32),
+        'white_to_move': spaces.Discrete(2)
+    })
+
+    # Define the action space
+    action_space = spaces.Discrete(20480)
     
     # Create a proper RLModuleSpec instance
     config["rl_module_spec"] = RLModuleSpec(
