@@ -89,277 +89,6 @@ class ChessMetricsCallback(DefaultCallbacks):
                 metrics_logger.log_value(key, value)
 
 
-class ChessMaskedRLModule(TorchRLModule):
-    """Custom RLModule for Chess that supports action masking - compatible with the new RLlib API stack"""
-    
-    def __init__(self, observation_space=None, action_space=None, inference_only=False, learner_only=False, model_config=None, **kwargs):
-        super().__init__(
-            observation_space=observation_space,
-            action_space=action_space,
-            inference_only=inference_only,
-            learner_only=learner_only,
-            model_config=model_config or {}
-        )
-        
-        # Get spaces
-        obs_space = observation_space
-        
-        # Print observation space details for debugging
-        print(f"Initializing ChessMaskedRLModule with observation space: {obs_space}")
-        if isinstance(obs_space, gym.spaces.Dict):
-            print(f"Dict keys: {obs_space.spaces.keys()}")
-            for key, space in obs_space.spaces.items():
-                print(f"  {key}: {space}")
-        
-        # Handle both Dict observation spaces and non-Dict spaces
-        if isinstance(obs_space, gym.spaces.Dict):
-            # Get feature dimensions from observation space
-            self.board_shape = obs_space["board"].shape
-            self.action_mask_shape = obs_space["action_mask"].shape
-        else:
-            # If we don't have a Dict space, assume it's a Box with the expected board dimensions
-            # Log a warning but continue instead of raising an error
-            print(f"WARNING: Expected Dict observation space but got {type(obs_space)}. Assuming standard dimensions.")
-            # Assume standard chess board dimensions: 13 channels for pieces, 8x8 board
-            self.board_shape = (13, 8, 8)
-            self.action_mask_shape = (action_space.n,)  # Standard action mask size
-            
-        self.board_channels = self.board_shape[0]  # 13 channels (6 piece types x 2 colors + empty)
-        self.board_size = self.board_shape[1]  # 8x8 board
-        
-        # Feature extractor CNN
-        self.features_extractor = nn.Sequential(
-            nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, 832),
-            nn.ReLU(),
-        )
-        
-        # Policy and value heads
-        self.policy_head = nn.Linear(832, action_space.n)
-        self.value_head = nn.Linear(832, 1)
-        
-        # Epsilon-greedy exploration parameters
-        self.initial_epsilon = 0.1  # 10% random action probability
-        self.final_epsilon = 0.02   # 2% random action probability
-        self.epsilon_timesteps = 1_000_000  # Decay over 1M timesteps
-        self.current_epsilon = self.initial_epsilon
-        self.random_exploration = True  # Set to False to disable exploration
-        self.timesteps = 0  # Track timesteps for epsilon decay
-        
-        # Check if we're in evaluation mode from model config
-        model_config_dict = model_config or {}
-        if model_config_dict.get("evaluation_mode", False):
-            self.random_exploration = False
-            print("Model initialized in evaluation mode, exploration disabled")
-        else:
-            print(f"Initialized epsilon-greedy exploration with initial_epsilon={self.initial_epsilon}, final_epsilon={self.final_epsilon}")
-    
-    def set_evaluation_mode(self, evaluation_mode=True):
-        """Explicitly set whether this model is in evaluation mode (disables exploration)"""
-        previous_mode = not self.random_exploration
-        if evaluation_mode:
-            self.random_exploration = False
-            print("Model set to evaluation mode, exploration disabled")
-        else:
-            self.random_exploration = True
-            print("Model set to training mode, exploration enabled")
-        return previous_mode
-    
-    def update_epsilon(self, num_steps=None):
-        """Update exploration epsilon based on timesteps or the provided step count"""
-        if num_steps is not None:
-            self.timesteps = num_steps
-        else:
-            self.timesteps += 1
-            
-        # Linear decay from initial_epsilon to final_epsilon over epsilon_timesteps
-        if self.timesteps < self.epsilon_timesteps:
-            self.current_epsilon = self.initial_epsilon - (self.initial_epsilon - self.final_epsilon) * (self.timesteps / self.epsilon_timesteps)
-        else:
-            self.current_epsilon = self.final_epsilon
-            
-        return self.current_epsilon
-    
-    def _forward_inference(self, batch):
-        """Forward pass for inference (no exploration)"""
-        # Check if batch has 'obs' key (new RLlib format)
-        if isinstance(batch, dict) and 'obs' in batch:
-            # Extract observation from batch
-            obs = batch['obs']
-            if isinstance(obs, dict) and 'board' in obs and 'action_mask' in obs:
-                board = obs['board']
-                action_mask = obs['action_mask']
-            else:
-                raise ValueError(f"Expected 'obs' to be a dict with 'board' and 'action_mask', got {type(obs)}")
-        # Direct dict format (old format)
-        elif isinstance(batch, dict) and 'board' in batch and 'action_mask' in batch:
-            board = batch['board']
-            action_mask = batch['action_mask']
-        else:
-            # Handle non-dict inputs (should be rare with the wrapper)
-            device = next(self.parameters()).device
-            # Create a default batch size of 1 if batch is not a tensor with shape
-            batch_size = getattr(batch, "shape", [1])[0] if hasattr(batch, "shape") else 1
-            board = torch.zeros((batch_size, 13, 8, 8), device=device)
-            action_mask = torch.zeros((batch_size, 20480), device=device)
-        
-        # Ensure we have a batch dimension
-        if len(board.shape) == 3:  # If missing batch dimension (13, 8, 8)
-            board = board.unsqueeze(0)  # Add batch dimension -> (1, 13, 8, 8)
-            
-        if len(action_mask.shape) == 1:  # If missing batch dimension (20480,)
-            action_mask = action_mask.unsqueeze(0)  # Add batch dimension -> (1, 20480)
-            
-        # Get batch size from board tensor
-        batch_size = board.shape[0]
-        device = board.device
-        
-        # Process through CNN feature extractor
-        features = self.features_extractor(board)
-        
-        # Add small epsilon to features to avoid NaN issues
-        features = features + 1e-8
-        
-        # Get raw action outputs (logits) and value estimates
-        action_logits = self.policy_head(features)
-        value = self.value_head(features)
-        
-        # Apply action mask by setting illegal actions to a large negative number
-        inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
-        masked_logits = action_logits + inf_mask
-            
-        # Apply gradient clipping to logits
-        masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
-        
-        # Get the most likely action (for deterministic policy)
-        actions = torch.argmax(masked_logits, dim=-1)
-        
-        # Convert to probabilities with softmax
-        probs = torch.nn.functional.softmax(masked_logits, dim=-1)
-        
-        # Compute log probabilities of the selected actions
-        action_indices = actions.unsqueeze(-1)
-        selected_probs = torch.gather(probs, 1, action_indices)
-        action_logp = torch.log(selected_probs + 1e-10).squeeze(-1)
-        
-        # Ensure correct shape for value function output
-        value = value.view(batch_size, 1)
-        
-        # Return output in the format expected by PPO
-        # CRITICAL: use the same key names as _forward_exploration for consistency
-        return {
-            # Required by PPO's action distribution
-            "action_dist_inputs": masked_logits,  # For PPO's policy distribution
-            
-            # Required by both training and inference pathways
-            "actions": actions,                  # Selected actions
-            
-            # Required for value function in PPO
-            "vf_preds": value,                   # State value predictions
-            
-            # Properly calculated log probabilities
-            "action_logp": action_logp,          # Log probs of selected actions
-            
-            # Include additional fields needed by PPO
-            "action_dist_params": {"logits": masked_logits},
-        }
-    
-    def _forward_exploration(self, batch, **kwargs):
-        if 'obs' not in batch:
-            raise ValueError("Expected 'obs' key in batch")
-        
-        obs = batch['obs']
-        
-        if not isinstance(obs, dict) or 'board' not in obs or 'action_mask' not in obs:
-            raise ValueError("Expected 'obs' to be a dict with 'board' and 'action_mask'")
-        
-        board = obs['board']
-        action_mask = obs['action_mask']
-        batch_size = board.shape[0]
-        device = board.device
-
-        if board.shape[1:] != (13, 8, 8) or action_mask.shape[1:] != (20480,):
-            raise ValueError(f"Unexpected shapes: board={board.shape}, action_mask={action_mask.shape}")
-
-        # Get features from CNN
-        features = self.features_extractor(board)
-        features = features + 1e-8
-        
-        # Get policy logits and value estimates
-        action_logits = self.policy_head(features)
-        value = self.value_head(features)
-
-        # Apply action mask by setting illegal moves to large negative values
-        inf_mask = torch.clamp(1 - action_mask, min=0, max=1) * -1000.0
-        masked_logits = action_logits + inf_mask
-
-        # Apply exploration if enabled
-        if self.random_exploration:
-            self.update_epsilon()
-            random_samples = torch.rand(batch_size, device=device) < self.current_epsilon
-            for i in range(batch_size):
-                if random_samples[i]:
-                    legal_actions = torch.where(action_mask[i] > 0)[0]
-                    if len(legal_actions) == 0:
-                        raise ValueError(f"No legal actions in batch index {i}, action_mask sum: {action_mask[i].sum()}")
-                    random_action_idx = legal_actions[torch.randint(0, len(legal_actions), (1,), device=device)].item()
-                    masked_logits[i] = torch.full_like(masked_logits[i], -5.0)
-                    masked_logits[i, random_action_idx] = 5.0
-
-        # Apply gradient clipping to logits
-        masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
-        
-        # Get actions based on logits
-        actions = torch.argmax(masked_logits, dim=-1)
-        
-        # Convert to probabilities with softmax
-        probs = torch.nn.functional.softmax(masked_logits, dim=-1)
-        
-        # Compute log probabilities of the selected actions
-        action_indices = actions.unsqueeze(-1)
-        selected_probs = torch.gather(probs, 1, action_indices)
-        action_logp = torch.log(selected_probs + 1e-10).squeeze(-1)
-        
-        # Ensure correct shape for value function output
-        value = value.view(batch_size, 1)
-
-        # Return output in the format expected by PPO
-        # CRITICAL: these key names must match what PPO expects
-        return {
-            # Required by PPO's action distribution
-            "action_dist_inputs": masked_logits,  # For PPO's policy distribution
-            
-            # Required by both training and inference pathways
-            "actions": actions,                  # Selected actions
-            
-            # Required for value function in PPO
-            "vf_preds": value,                   # State value predictions
-            
-            # Properly calculated log probabilities
-            "action_logp": action_logp,          # Log probs of selected actions
-            
-            # Include additional fields needed by PPO
-            "action_dist_params": {"logits": masked_logits},
-        }
-    
-    def forward(self, batch, **kwargs):
-        """Forward method for both training and inference"""
-        # Check if we're in inference mode
-        deterministic = kwargs.get("deterministic", False)
-        
-        if deterministic:
-            return self._forward_inference(batch)
-        else:
-            return self._forward_exploration(batch, **kwargs)
-
-
 def create_rllib_chess_env(config):
     """Factory function to create chess environment for RLlib"""
     try:
@@ -593,7 +322,7 @@ def train(args):
                 print(f"  {key}: {type(value)} with value {value}")
     print("============================\n")
 
-    # Register only the environment (we don't need ModelCatalog with RLModule API)
+    # Register only the environment 
     tune.register_env("chess_env", create_rllib_chess_env)
     
     # Create an absolute path for checkpoint directory
@@ -618,13 +347,12 @@ def train(args):
         else:
             print(f"Warning: Checkpoint path {args.checkpoint} does not exist. Starting fresh.")
 
-    # Modify config to use learner API properly with all GPUs
-    # Reassign GPU resources - crucial for fixing utilization
+    # Create config using RLlib's built-in CNN model
     config = {
         "env": "chess_env",
         "framework": "torch",
         "disable_env_checking": True,
-        "_enable_rl_module_api": True,
+        "_enable_rl_module_api": False,  # Turn OFF RL module API - we're using built-in models
         "_enable_learner_api": True,
         "num_workers": 12,
         "num_cpus_per_env_runner": 4,
@@ -655,47 +383,31 @@ def train(args):
         "vf_share_layers": False,  # Use separate value network
         "normalize_actions": False,  # Don't normalize actions (chess is discrete)
         
+        # *** IMPORTANT: Configure built-in CNN model with masking ***
+        "model": {
+            # Define CNN architecture
+            "conv_filters": [
+                [128, [3, 3], 1],  # 128 filters, 3x3 kernel, stride 1
+                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
+                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
+            ],
+            "post_fcnet_hiddens": [832],  # Hidden layer after CNN (equiv. to our 832 in custom model)
+            "custom_action_dist": "masked",  # CRITICAL: Use masked action distribution
+            "custom_model": "mask",  # Use RLlib's built-in masking model
+        },
+        
         # Postprocessing
         "preprocessor_pref": None,  # No preprocessor
         "observation_filter": "NoFilter",  # No observation normalization
-        
-        # Critical settings for advantage calculation
-        "_tf_policy_handles_more_than_one_loss": True,
-        "model": {
-            "custom_model": None,  # Not using legacy ModelCatalog API
-            "vf_share_layers": False,  # Separate value function
-        },
-        
-        # Enable everything needed for new API stack
-        "_use_default_native_models": False,
-        "_disable_preprocessor_api": True,
-        "_disable_action_flattening": True,
-        "_enable_new_api_stack": True,
-        "simple_optimizer": True,  # Simpler optimizer, more stable
     }
     
-    # Define the observation space
-    observation_space = spaces.Dict({
-        'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-        'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32),
-        'white_to_move': spaces.Discrete(2)
-    })
-
-    # Define the action space
-    action_space = spaces.Discrete(20480)
-    
-    # Create a proper RLModuleSpec instance
-    config["rl_module_spec"] = RLModuleSpec(
-        module_class=ChessMaskedRLModule,
-        observation_space=observation_space,
-        action_space=action_space,
-        model_config={"evaluation_mode": False}
-    )
-    
-    print("\n===== Multi-GPU Learner Configuration =====")
-    print(f"GPU allocation: 4 learners with 1.0 GPU each")
-    print(f"Workers focus on data collection without GPU allocation")
-    print("===========================================\n")
+    print("\n===== Using RLlib's Built-in CNN Model =====")
+    print("CNN Architecture:")
+    for layer in config["model"]["conv_filters"]:
+        print(f"  {layer[0]} filters, {layer[1]}x{layer[1]} kernel, stride {layer[2]}")
+    print(f"FC Layers: {config['model']['post_fcnet_hiddens']}")
+    print(f"Using built-in masked action distribution")
+    print("============================================\n")
     
     analysis = tune.run(
         "PPO",
@@ -732,26 +444,29 @@ def evaluate(args):
     # Initialize Ray
     ray.init(ignore_reinit_error=True, include_dashboard=args.dashboard)
     
-    # Register only the environment (we don't need ModelCatalog with RLModule API)
+    # Register only the environment
     tune.register_env("chess_env", create_rllib_chess_env)
     
-    # Create evaluation configuration
+    # Create evaluation configuration with built-in CNN model
     config = {
         "env": "chess_env",
         "framework": "torch",
         "num_workers": 0,  # Single worker for evaluation
         "num_gpus": 1 if args.device == "cuda" else 0,  # Use exact integers for GPU allocation
-        # Use RLModule API with proper RLModuleSpec
-        "_enable_rl_module_api": True,
+        # Use built-in model with masking
+        "model": {
+            "conv_filters": [
+                [128, [3, 3], 1],  # 128 filters, 3x3 kernel, stride 1
+                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
+                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
+            ],
+            "post_fcnet_hiddens": [832],
+            "custom_action_dist": "masked",
+            "custom_model": "mask",
+        },
         # Critical: Ensure we're using deterministic actions (no exploration)
         "explore": False,
     }
-    
-    # Create a proper RLModuleSpec instance for evaluation
-    config["rl_module_spec"] = RLModuleSpec(
-        module_class=ChessMaskedRLModule,
-        model_config={"evaluation_mode": True}
-    )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
     # Create algorithm and restore from checkpoint
