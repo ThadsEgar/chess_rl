@@ -241,6 +241,14 @@ class ChessMaskedRLModule(TorchRLModule):
         # Get the most likely action (for deterministic policy)
         actions = torch.argmax(masked_logits, dim=-1)
         
+        # Convert to probabilities with softmax
+        probs = torch.nn.functional.softmax(masked_logits, dim=-1)
+        
+        # Compute log probabilities of the selected actions
+        action_indices = actions.unsqueeze(-1)
+        selected_probs = torch.gather(probs, 1, action_indices)
+        action_logp = torch.log(selected_probs + 1e-10).squeeze(-1)
+        
         # Ensure correct shape for value function output
         value = value.view(batch_size, 1)
         
@@ -255,6 +263,12 @@ class ChessMaskedRLModule(TorchRLModule):
             
             # Required for value function in PPO
             "vf_preds": value,                   # State value predictions
+            
+            # Properly calculated log probabilities
+            "action_logp": action_logp,          # Log probs of selected actions
+            
+            # Include additional fields needed by PPO
+            "action_dist_params": {"logits": masked_logits},
         }
     
     def _forward_exploration(self, batch, **kwargs):
@@ -305,6 +319,14 @@ class ChessMaskedRLModule(TorchRLModule):
         # Get actions based on logits
         actions = torch.argmax(masked_logits, dim=-1)
         
+        # Convert to probabilities with softmax
+        probs = torch.nn.functional.softmax(masked_logits, dim=-1)
+        
+        # Compute log probabilities of the selected actions
+        action_indices = actions.unsqueeze(-1)
+        selected_probs = torch.gather(probs, 1, action_indices)
+        action_logp = torch.log(selected_probs + 1e-10).squeeze(-1)
+        
         # Ensure correct shape for value function output
         value = value.view(batch_size, 1)
 
@@ -318,7 +340,13 @@ class ChessMaskedRLModule(TorchRLModule):
             "actions": actions,                  # Selected actions
             
             # Required for value function in PPO
-            "vf_preds": value,                   # State value predictions (renamed from "vf")
+            "vf_preds": value,                   # State value predictions
+            
+            # Properly calculated log probabilities
+            "action_logp": action_logp,          # Log probs of selected actions
+            
+            # Include additional fields needed by PPO
+            "action_dist_params": {"logits": masked_logits},
         }
     
     def forward(self, batch, **kwargs):
