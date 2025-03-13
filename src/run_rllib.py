@@ -231,7 +231,7 @@ class ChessMaskedRLModule(TorchRLModule):
             print(f"Output shapes - masked_logits: {masked_logits.shape}, actions: {actions.shape}")
             
             return {
-                "action_dist": masked_logits,
+                "action_dist_inputs": masked_logits,
                 "actions": actions
             }
         
@@ -243,7 +243,7 @@ class ChessMaskedRLModule(TorchRLModule):
         print(f"Output shapes - action_logits: {action_logits.shape}, actions: {actions.shape}")
             
         return {
-            "action_dist": action_logits,
+            "action_dist_inputs": action_logits,
             "actions": actions
         }
     
@@ -285,13 +285,11 @@ class ChessMaskedRLModule(TorchRLModule):
                     masked_logits[i, random_action_idx] = 5.0
 
         masked_logits = torch.clamp(masked_logits, min=-50.0, max=50.0)
-        actions = torch.argmax(masked_logits, dim=-1)
         value = value.view(batch_size, 1)  # Ensure value matches batch size
 
         return {
-            'action_dist': masked_logits,
-            'vf': value,
-            'actions': actions
+            "action_dist_inputs": masked_logits,  # Changed from 'action_dist'
+            "vf": value,
         }
     
     def forward(self, batch, **kwargs):
@@ -571,11 +569,11 @@ def train(args):
         "disable_env_checking": True,
         "_enable_rl_module_api": True,
         "_enable_learner_api": True,
-        "num_workers": 12,
-        "num_cpus_per_env_runner": 4,
-        "num_gpus_per_learner": 1.0,
-        "num_learners": 4,
-        "train_batch_size": 4096,
+        "num_workers": 2,
+        "num_cpus_per_env_runner": 2,
+        "num_gpus_per_learner": 2,
+        "num_learners": 2,
+        "train_batch_size": 2048,
         "sgd_minibatch_size": 128,
         "lr": 5e-5,
         "grad_clip": 1.0,
@@ -600,6 +598,8 @@ def train(args):
     # Create a proper RLModuleSpec instance
     config["rl_module_spec"] = RLModuleSpec(
         module_class=ChessMaskedRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
         model_config={"evaluation_mode": False}
     )
     
