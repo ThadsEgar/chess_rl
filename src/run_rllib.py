@@ -144,12 +144,16 @@ class ChessMaskingRLModule(TorchRLModule):
         # Calculate log probabilities of sampled actions
         action_log_probs = action_dist.log_prob(actions)
         
-        # Return required fields including Columns.ACTIONS and Columns.ACTION_LOGP
+        # Add entropy calculation
+        entropy = action_dist.entropy()
+        
+        # Return all required outputs with correct column names
         return {
             Columns.ACTIONS: actions,
             Columns.ACTION_DIST_INPUTS: masked_logits,
             Columns.ACTION_LOGP: action_log_probs,
-            Columns.VF_PREDS: value
+            Columns.VF_PREDS: value,  # Use the correct column name
+            "entropy": entropy
         }
 
 
@@ -280,7 +284,12 @@ def train(args):
             enable_rl_module_and_learner=True,
             enable_env_runner_and_connector_v2=True
         )
-        
+        .offline_data(
+            input_connector_pipeline_config={
+                "extend_with_general_advantage_estimation": True,
+                "gae_lambda": 0.95,
+            }
+        )
     )
 
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
