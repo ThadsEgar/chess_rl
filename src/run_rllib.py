@@ -319,6 +319,7 @@ def evaluate(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
+        model_config={},
     )
 
     config = (
@@ -327,7 +328,7 @@ def evaluate(args):
         .framework("torch")
         .resources(num_gpus=1 if args.device == "cuda" else 0)
         .env_runners(num_env_runners=0, num_cpus_per_env_runner=1)
-        .rl_module(rl_module_spec=rl_module_spec)  # Removed action_distribution_config
+        .rl_module(rl_module_spec=rl_module_spec)
         .exploration(explore=False)
         .training(lambda_=0.95, num_epochs=0)
     )
