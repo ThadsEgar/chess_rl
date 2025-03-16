@@ -137,12 +137,14 @@ class ChessMaskingRLModule(TorchRLModule):
         masked_logits = action_logits + (action_mask - 1) * 1e9  # Large negative for invalid actions
         value = self.value_head(features).view(batch_size, 1)
         
-        # Using Columns.ACTIONS and Columns.ACTION_DIST_INPUTS
+        # Create action distribution and sample actions
+        action_dist = torch.distributions.Categorical(logits=masked_logits)
+        actions = action_dist.sample()
         
-        # Create explicit action distribution for sampling
+        # Return required fields including Columns.ACTIONS
         return {
             Columns.ACTION_DIST_INPUTS: masked_logits,
-            # We don't return actions directly - let RLlib sample them from the distribution
+            Columns.ACTIONS: actions,
             "vf_preds": value
         }
 
