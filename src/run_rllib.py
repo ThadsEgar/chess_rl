@@ -74,19 +74,26 @@ class ChessRewardConnector(ConnectorV2):
         - Intermediate rewards alternate (White: as-is, Black: flipped).
         - Terminal rewards: winner +1, loser -1.
         """
-        print(f"{batch}")
+        print(f"ChessRewardConnector called")
+        print(f"Batch: {batch}")
+        print(f"Episodes: {episodes}")
+        print(f"Explore: {explore}")
         
         # Skip processing if required keys don't exist (e.g., during initialization)
-        if "rewards" not in data or "dones" not in data or "infos" not in data:
-            return data
+        if not batch or "rewards" not in batch or "dones" not in batch or "infos" not in batch:
+            print(f"Skipping reward processing - required keys missing")
+            return batch
         
-        rewards = data["rewards"]
-        dones = data["dones"]
-        infos = data["infos"]
+        rewards = batch["rewards"]
+        dones = batch["dones"]
+        infos = batch["infos"]
         
         # Skip processing if rewards, dones, or infos are empty
         if len(rewards) == 0 or len(dones) == 0 or len(infos) == 0:
-            return data
+            print(f"Skipping reward processing - required arrays empty")
+            return batch
+        
+        print(f"Processing rewards: {rewards}")
 
         # Adjust all rewards
         adjusted_rewards = rewards.copy()
@@ -130,9 +137,11 @@ class ChessRewardConnector(ConnectorV2):
                     if terminal_index > 0:
                         adjusted_rewards[terminal_index - 1] = 0.0
 
+        print(f"Adjusted rewards: {adjusted_rewards}")
+        
         # Update the data batch
-        data["rewards"] = adjusted_rewards
-        return data
+        batch["rewards"] = adjusted_rewards
+        return batch
 
 # Metrics-only callback
 class ChessCombinedCallback(DefaultCallbacks):
@@ -248,17 +257,31 @@ def create_rllib_chess_env(config):
                 "white_to_move": gym.spaces.Discrete(2)
             })
             self.action_space = env.action_space
+            self.steps = 0
+            print(f"DictObsWrapper initialized with action space: {self.action_space}")
 
         def reset(self, **kwargs):
+            self.steps = 0
+            print(f"Environment reset")
             obs, info = self.env.reset(**kwargs)
-            return self._wrap_observation(obs), info
+            wrapped_obs = self._wrap_observation(obs)
+            print(f"Reset obs: {type(wrapped_obs)}, info: {info}")
+            return wrapped_obs, info
 
         def step(self, action):
+            self.steps += 1
+            print(f"Step {self.steps}, action: {action}")
             obs, reward, terminated, truncated, info = self.env.step(action)
-            return self._wrap_observation(obs), reward, terminated, truncated, info
+            print(f"Raw step result - reward: {reward}, terminated: {terminated}, info: {info}")
+            
+            # Here is where we could shape rewards directly in the environment
+            wrapped_obs = self._wrap_observation(obs)
+            print(f"Wrapped obs type: {type(wrapped_obs)}")
+            return wrapped_obs, reward, terminated, truncated, info
 
         def _wrap_observation(self, obs):
             if not isinstance(obs, dict) or "board" not in obs or "action_mask" not in obs:
+                print(f"Warning: Invalid observation format: {type(obs)}")
                 return {
                     "board": np.zeros((13, 8, 8), dtype=np.float32),
                     "action_mask": np.ones(self.action_space.n, dtype=np.float32),
@@ -274,7 +297,18 @@ def create_rllib_chess_env(config):
 
 # Define a function to create an env-to-module connector pipeline using the ChessRewardConnector
 def make_chess_reward_connector(env):
+    print(f"Creating chess reward connector for env: {env}")
     # Return a single ConnectorV2 object or a list of ConnectorV2 objects
+    return [ChessRewardConnector()]
+
+# If we want to use the connector on the module-to-env side, we'll define this function
+def make_module_to_env_connector(env):
+    print(f"Creating module-to-env connector for env: {env}")
+    return [ChessRewardConnector()]
+
+# You might want to add this function if you need a learner connector pipeline
+def make_learner_connector():
+    print(f"Creating learner connector")
     return [ChessRewardConnector()]
 
 def train(args):
@@ -337,6 +371,7 @@ def train(args):
         .learners(
             num_learners=num_learners,
             num_gpus_per_learner=num_gpus_per_learner,
+            learner_connector_fn=make_learner_connector,
         )
         .env_runners(
             num_env_runners=num_env_runners,
@@ -344,7 +379,8 @@ def train(args):
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
             sample_timeout_s=None,
-            env_to_module_connector=make_chess_reward_connector
+            env_to_module_connector=make_chess_reward_connector,
+            module_to_env_connector=make_module_to_env_connector,
         )
         .training(
             train_batch_size_per_learner=4096,
