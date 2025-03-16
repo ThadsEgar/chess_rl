@@ -215,8 +215,8 @@ def train(args):
         print(f"Configuring for {gpu_count} GPUs")
         num_learners = gpu_count  # One learner per GPU
         driver_gpus = 0  # Driver shares GPUs with learners
-        gpus_per_learner = 1  # Full GPU per learner
-        gpus_per_worker = 0  # Env runners share GPUs
+        gpus_per_learner = .5  # Full GPU per learner
+        gpus_per_worker = .49999 / num_workers  # Env runners share GPUs
     else:
         print("Configuring for single GPU or CPU")
         num_learners = 1
