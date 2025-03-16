@@ -48,6 +48,7 @@ class ChessRewardConnector(ConnectorV2):
         - Intermediate rewards alternate (White: as-is, Black: flipped).
         - Terminal rewards: winner +1, loser -1.
         """
+        print(f"{data}")
         rewards = data["rewards"]
         dones = data["dones"]
         infos = data["infos"]
