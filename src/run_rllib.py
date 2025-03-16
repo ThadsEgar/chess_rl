@@ -144,6 +144,8 @@ class ChessMaskingRLModule(TorchRLModule):
         # Return required fields including Columns.ACTIONS
         return {
             Columns.ACTIONS: actions,
+            Columns.ACTION_DIST_INPUTS: masked_logits,
+            "vf_preds": value
         }
 
 
