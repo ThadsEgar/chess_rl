@@ -272,7 +272,6 @@ def train(args):
         )
         .callbacks(ChessMetricsCallback)
         .rl_module(rl_module_spec=rl_module_spec)
-        .experimental(_enable_new_api_stack=True)  # Explicitly enable new stack
     )
 
     print(f"Training with {num_learners} learners, {num_workers} env runners")
