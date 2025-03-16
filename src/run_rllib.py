@@ -68,7 +68,8 @@ class ChessCombinedCallback(RLlibCallback):
             "stalemate": 0.0,
         }
 
-        info = episode.get_last_info() or {}
+        infos = episode.get_infos()
+        info = infos[-1] if infos else {}
         if "outcome" in info:
             outcome = info["outcome"]
             if outcome == "white_win":
