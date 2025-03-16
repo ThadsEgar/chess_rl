@@ -91,11 +91,12 @@ class ChessMetricsCallback(DefaultCallbacks):
 
 
 class ChessMaskingRLModule(TorchRLModule):
-    def __init__(self, observation_space=None, action_space=None, model_config=None, **kwargs):
+    def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False, **kwargs):
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
-            model_config=model_config or {}
+            model_config=model_config or {},
+            inference_only=inference_only
         )
         
         self.board_shape = observation_space["board"].shape
@@ -218,7 +219,7 @@ def train(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config={"fcnet_hiddens": []},
+        model_config_dict={"fcnet_hiddens": []},
     )
 
     config = (
@@ -286,7 +287,6 @@ def evaluate(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config={"fcnet_hiddens": []},
     )
 
     config = (
