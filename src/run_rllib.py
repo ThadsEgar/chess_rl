@@ -250,7 +250,6 @@ def train(args):
         )
         .callbacks(ChessMetricsCallback)
         .rl_module(rl_module_spec=rl_module_spec)  # Removed action_distribution_config
-        .experimental(_enable_new_api_stack=True)
     )
 
     analysis = tune.run(
