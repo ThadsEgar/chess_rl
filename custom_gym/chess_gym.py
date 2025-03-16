@@ -200,29 +200,6 @@ class ChessState:
         """Return a deep copy of the state."""
         return ChessState(self.board.copy())
 
-def create_simple_endgame(random_side=True):
-    """
-    Create a simple endgame position for testing.
-    """
-    board = chess.Board()
-    board.clear()
-    
-    # Place kings
-    board.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
-    board.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
-    
-    # Place a queen for white
-    if random_side:
-        white_side = random.choice([chess.WHITE, chess.BLACK])
-        board.set_piece_at(chess.D1 if white_side == chess.WHITE else chess.D8, 
-                          chess.Piece(chess.QUEEN, white_side))
-        board.turn = not white_side  # Make it the other side's turn
-    else:
-        # Always place white queen
-        board.set_piece_at(chess.D1, chess.Piece(chess.QUEEN, chess.WHITE))
-        board.turn = chess.BLACK
-        
-    return board
 
 class ChessEnv(gym.Env):
     metadata = {"render.modes": ["human"]}
@@ -234,10 +211,6 @@ class ChessEnv(gym.Env):
         self.board = chess.Board()
         self.state = ChessState(self.board)
         
-        # Create a simple endgame test position if requested
-        if simple_test:
-            self.board = create_simple_endgame(random_side=True)
-            self.state = ChessState(self.board)
         
         # Give white an advantage if requested (for testing value function)
         if white_advantage is not None:

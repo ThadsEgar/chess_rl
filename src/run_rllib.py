@@ -38,6 +38,41 @@ class CustomPPO(PPO):
         sample_batch = super().postprocess_trajectory(sample_batch, other_agent_batches, episode)
         print(f"After postprocessing: {list(sample_batch.keys())}")
         return sample_batch
+    
+class ChessRewardFlipCallback(DefaultCallbacks):
+    def on_postprocess_trajectory(
+        self,
+        worker,
+        episodes,
+        agent_id,
+        policy_id,
+        policies,
+        postprocessed_batch,
+        original_batches,
+        **kwargs
+    ):
+        # Access the sample batch
+        batch = postprocessed_batch
+
+        # Identify the terminal step (where the episode ends)
+        dones = batch["dones"]
+        terminal_indices = np.where(dones)[0]
+        if len(terminal_indices) > 0:
+            terminal_index = terminal_indices[-1]  # Take the last terminal step
+
+            # Check the game outcome from the info dictionary
+            info = batch["infos"][terminal_index]
+            if "black_won" in info and info["black_won"]:
+                # If black won, flip the terminal reward to +1.0
+                batch["rewards"][terminal_index] = 1.0
+            elif "white_won" in info and info["white_won"]:
+                # If white won, no flip needed (assuming it’s already set appropriately)
+                pass
+            elif "draw" in info and info["draw"]:
+                # If it’s a draw, set reward to 0.0
+                batch["rewards"][terminal_index] = 0.0
+
+        return batch
 
 
 class ChessMetricsCallback(DefaultCallbacks):
@@ -180,7 +215,6 @@ def create_rllib_chess_env(config):
 
         def step(self, action):
             obs, reward, terminated, truncated, info = self.env.step(action)
-            print(f"Step output: obs={obs.keys()}, reward={reward}, done={terminated}")
             return self._wrap_observation(obs), reward, terminated, truncated, info
 
         def _wrap_observation(self, obs):
@@ -282,7 +316,7 @@ def train(args):
             kl_coeff=0.2,
             vf_share_layers=False,
         )
-        .callbacks(ChessMetricsCallback)
+        .callbacks(ChessMetricsCallback, ChessRewardFlipCallback)
         .rl_module(rl_module_spec=rl_module_spec)
         .api_stack(
             enable_rl_module_and_learner=True,
