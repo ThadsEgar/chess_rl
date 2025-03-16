@@ -180,6 +180,7 @@ def create_rllib_chess_env(config):
 
         def step(self, action):
             obs, reward, terminated, truncated, info = self.env.step(action)
+            print(f"Step output: obs={obs.keys()}, reward={reward}, done={terminated}")
             return self._wrap_observation(obs), reward, terminated, truncated, info
 
         def _wrap_observation(self, obs):
