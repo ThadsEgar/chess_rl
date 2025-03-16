@@ -130,7 +130,7 @@ print(f"Detected Ray version: {ray.__version__}")
 if RAY_VERSION_FLOAT > 2.9:
     try:
         # For newer Ray versions, provide backwards compatibility
-        print("Setting up compatibility layer for newer Ray version")
+        print(f"Setting up compatibility layer for Ray {RAY_VERSION}")
         
         # Compatibility imports that might be needed
         try:
@@ -168,6 +168,27 @@ if RAY_VERSION_FLOAT > 2.9:
                         print("Added compatibility method: AlgorithmConfig.rollouts")
             except Exception as e:
                 print(f"Warning: Failed to patch AlgorithmConfig: {e}")
+                
+            # Patch RLModuleSpec for backwards compatibility
+            try:
+                from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+                
+                # Add compatibility for parameter name changes
+                original_init = RLModuleSpec.__init__
+                
+                if not hasattr(RLModuleSpec, "_init_compat_added"):
+                    def _init_compat(self, *args, **kwargs):
+                        # Handle parameter name changes
+                        if "model_config_dict" in kwargs and "model_config" not in kwargs:
+                            print("Using compatibility layer: model_config_dict -> model_config")
+                            kwargs["model_config"] = kwargs.pop("model_config_dict")
+                        return original_init(self, *args, **kwargs)
+                    
+                    RLModuleSpec.__init__ = _init_compat
+                    setattr(RLModuleSpec, "_init_compat_added", True)
+                    print("Added compatibility method: RLModuleSpec.__init__")
+            except Exception as e:
+                print(f"Warning: Failed to patch RLModuleSpec: {e}")
     except Exception as e:
         print(f"Warning: Error setting up Ray compatibility layer: {e}")
 EOF

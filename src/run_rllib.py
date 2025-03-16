@@ -478,7 +478,7 @@ def train(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config_dict={"fcnet_hiddens": []},  # Empty, we define our own architecture
+        model_config={"fcnet_hiddens": []},  # Empty, we define our own architecture
     )
     
     # Create config using the latest Ray API style (post-2.0)
@@ -601,7 +601,7 @@ def evaluate(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config_dict={"fcnet_hiddens": []},
+        model_config={"fcnet_hiddens": []},
     )
     
     # Create evaluation config with the latest Ray API
