@@ -501,7 +501,7 @@ def train(args):
         # Environment runners configuration (replaces rollouts)
         .env_runners(
             num_env_runners=num_workers,
-            num_envs_per_worker=num_envs,
+            num_envs_per_env_runner=num_envs,
             rollout_fragment_length="auto",
             batch_mode="truncate_episodes",
             num_cpus_per_env_runner=cpus_per_worker,

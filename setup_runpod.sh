@@ -161,6 +161,8 @@ if RAY_VERSION_FLOAT > 2.9:
                                 kwargs["num_env_runners"] = kwargs.pop("num_rollout_workers")
                             if "remote_worker_envs" in kwargs:
                                 kwargs["remote_env_runner_envs"] = kwargs.pop("remote_worker_envs")
+                            if "num_envs_per_worker" in kwargs:
+                                kwargs["num_envs_per_env_runner"] = kwargs.pop("num_envs_per_worker")
                             return self.env_runners(*args, **kwargs)
                         
                         setattr(AlgorithmConfig, "rollouts", _rollouts_compat)
