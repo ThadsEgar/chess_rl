@@ -163,13 +163,24 @@ class ChessMaskingRLModule(TorchRLModule):
         """Forward pass - simplified for the new API, RLlib handles masking"""
         # Extract the board from observations
         if isinstance(batch, dict) and 'obs' in batch:
+            # Standard case for RLlib 2.0+
             obs = batch['obs']
             if isinstance(obs, dict) and 'board' in obs:
                 board = obs['board']
             else:
                 device = next(self.parameters()).device
-                board = torch.zeros((batch.shape[0], 13, 8, 8), device=device)
+                batch_size = batch['obs'].shape[0] if hasattr(batch['obs'], 'shape') else 1
+                board = torch.zeros((batch_size, 13, 8, 8), device=device)
+        elif hasattr(batch, 'obs'):
+            # Handle tensor-based observations (may happen in newer Ray versions)
+            if hasattr(batch.obs, 'board'):
+                board = batch.obs.board
+            else:
+                device = next(self.parameters()).device
+                batch_size = getattr(batch, "batch_size", 1)
+                board = torch.zeros((batch_size, 13, 8, 8), device=device)
         else:
+            # Fallback for unknown formats
             device = next(self.parameters()).device
             board = torch.zeros((1, 13, 8, 8), device=device)
         
@@ -493,7 +504,7 @@ def train(args):
             batch_mode="truncate_episodes",
         )
         
-        # Training parameters
+        # Training parameters - including PPO-specific parameters
         .training(
             # Use the predefined batch sizes calculated based on hardware
             train_batch_size=4096,
@@ -501,8 +512,15 @@ def train(args):
             num_sgd_iter=10,
             lr=5e-5,
             grad_clip=1.0,
+            gamma=0.99,
+            lambda_=0.95,  # Note: using lambda_ not lambda which is a Python keyword
+            use_gae=True,
+            vf_loss_coeff=0.5,
+            entropy_coeff=args.entropy_coeff,
+            clip_param=0.2,
+            kl_coeff=0.2,
+            vf_share_layers=False,
             _tf_policy_handles_more_than_one_loss=True,
-            model={"vf_share_layers": False},
         )
         
         # Add callbacks
@@ -519,21 +537,6 @@ def train(args):
         .debugging(disable_env_checking=True)
         .multi_agent(enable_correction=True)  # Support for newer Ray versions
         .experimental(_enable_new_api_stack=True)
-    )
-    
-    # Add PPO-specific parameters
-    config = merge_dicts(
-        config.to_dict(),
-        {
-            "entropy_coeff": args.entropy_coeff,
-            "gamma": 0.99,
-            "lambda": 0.95,
-            "use_gae": True,
-            "vf_loss_coeff": 0.5,
-            "kl_coeff": 0.2,
-            "clip_param": 0.2,
-            "vtrace": False,
-        }
     )
     
     print("\n===== Using New RLlib API Stack with RLModule =====")
@@ -622,7 +625,10 @@ def evaluate(args):
         )
         
         # Disable exploration for deterministic evaluation
-        .exploration(explore=False)
+        .exploration(explore=False, exploration_config={"type": "StochasticSampling"})
+        
+        # Evaluation-specific training params
+        .training(vf_share_layers=False)
         
         # Enable newer API support
         .experimental(_enable_new_api_stack=True)
