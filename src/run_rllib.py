@@ -519,8 +519,7 @@ def train(args):
             grad_clip=1.0,
             gamma=0.99,
             use_gae=True,
-            **{"lambda": 0.95},  # Must use dict unpacking since lambda is a Python keyword
-            
+            lambda_=0.95,            
             # PPO-specific parameters
             vf_loss_coeff=0.5,
             entropy_coeff=args.entropy_coeff,
