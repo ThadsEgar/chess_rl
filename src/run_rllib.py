@@ -49,9 +49,18 @@ class ChessRewardConnector(ConnectorV2):
         - Terminal rewards: winner +1, loser -1.
         """
         print(f"{data}")
+        
+        # Skip processing if required keys don't exist (e.g., during initialization)
+        if "rewards" not in data or "dones" not in data or "infos" not in data:
+            return data
+        
         rewards = data["rewards"]
         dones = data["dones"]
         infos = data["infos"]
+        
+        # Skip processing if rewards, dones, or infos are empty
+        if len(rewards) == 0 or len(dones) == 0 or len(infos) == 0:
+            return data
 
         # Adjust all rewards
         adjusted_rewards = rewards.copy()
@@ -336,7 +345,7 @@ def train(args):
         checkpoint_freq=25,
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
-        verbose=2,
+        verbose=3,
         config=config.to_dict(),  # Convert to dict for tune.run
         resume="AUTO",
         restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
