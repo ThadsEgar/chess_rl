@@ -25,8 +25,7 @@ from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.tune.utils import merge_dicts
-from ray.rllib.connectors import ActionDistributionSampling
-
+from ray.rllib.core.columns import Columns
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 
@@ -133,12 +132,17 @@ class ChessMaskingRLModule(TorchRLModule):
         features = self.features_extractor(board) + 1e-8
         action_logits = self.policy_head(features)
         
+        # Apply action masking
         action_mask = action_mask.to(action_logits.device)
-        masked_logits = action_logits + (action_mask - 1) * 1e9
+        masked_logits = action_logits + (action_mask - 1) * 1e9  # Large negative for invalid actions
         value = self.value_head(features).view(batch_size, 1)
         
+        # Using Columns.ACTIONS and Columns.ACTION_DIST_INPUTS
+        
+        # Create explicit action distribution for sampling
         return {
-            "action_dist_inputs": masked_logits,
+            Columns.ACTION_DIST_INPUTS: masked_logits,
+            # We don't return actions directly - let RLlib sample them from the distribution
             "vf_preds": value
         }
 
@@ -255,7 +259,6 @@ def train(args):
             num_envs_per_env_runner=num_envs,
             num_cpus_per_env_runner=cpus_per_worker,
             num_gpus_per_env_runner=gpus_per_worker,
-            connector_pipeline=[ActionDistributionSampling()]
         )
         .training(
             train_batch_size_per_learner=4096,
