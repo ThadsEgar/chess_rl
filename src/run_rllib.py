@@ -316,7 +316,7 @@ def train(args):
             kl_coeff=0.2,
             vf_share_layers=False,
         )
-        .callbacks(ChessMetricsCallback, ChessRewardFlipCallback)
+        .callbacks([ChessMetricsCallback, ChessRewardFlipCallback])
         .rl_module(rl_module_spec=rl_module_spec)
         .api_stack(
             enable_rl_module_and_learner=True,
