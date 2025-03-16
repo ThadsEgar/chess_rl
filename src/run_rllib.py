@@ -252,7 +252,7 @@ def train(args):
         PPOConfig()
         .environment("chess_env")
         .framework("torch")
-        .resources(num_gpus=driver_gpus)
+        .resources(num_cpus_for_main_process=8,num_gpus=driver_gpus)
         # Configure learners based on available GPUs
         .learners(
             num_learners=num_learners,
@@ -319,7 +319,6 @@ def evaluate(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config={},
     )
 
     config = (
@@ -328,7 +327,7 @@ def evaluate(args):
         .framework("torch")
         .resources(num_gpus=1 if args.device == "cuda" else 0)
         .env_runners(num_env_runners=0, num_cpus_per_env_runner=1)
-        .rl_module(rl_module_spec=rl_module_spec)
+        .rl_module(rl_module_spec=rl_module_spec)  # Removed action_distribution_config
         .exploration(explore=False)
         .training(lambda_=0.95, num_epochs=0)
     )
