@@ -25,6 +25,7 @@ from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.tune.utils import merge_dicts
+from ray.rllib.connectors import ActionDistributionSampling
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -254,6 +255,7 @@ def train(args):
             num_envs_per_env_runner=num_envs,
             num_cpus_per_env_runner=cpus_per_worker,
             num_gpus_per_env_runner=gpus_per_worker,
+            connector_pipeline=[ActionDistributionSampling()]
         )
         .training(
             train_batch_size_per_learner=4096,
