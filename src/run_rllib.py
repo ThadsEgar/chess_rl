@@ -32,6 +32,13 @@ from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 # Framework-specific imports
 torch, nn = try_import_torch()
 
+class CustomPPO(PPO):
+    def postprocess_trajectory(self, sample_batch, other_agent_batches=None, episode=None):
+        print(f"Postprocessing batch keys: {list(sample_batch.keys())}")
+        sample_batch = super().postprocess_trajectory(sample_batch, other_agent_batches, episode)
+        print(f"After postprocessing: {list(sample_batch.keys())}")
+        return sample_batch
+
 
 class ChessMetricsCallback(DefaultCallbacks):
     def on_episode_end(
@@ -286,7 +293,7 @@ def train(args):
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
 
     analysis = tune.run(
-        "PPO",
+        CustomPPO,
         stop={"training_iteration": args.max_iterations},
         checkpoint_freq=25,
         checkpoint_at_end=True,
