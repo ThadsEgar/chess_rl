@@ -478,30 +478,34 @@ def train(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config={"fcnet_hiddens": []},  # Empty, we define our own architecture
+        model_config_dict={"fcnet_hiddens": []},  # Empty, we define our own architecture
     )
     
-    # Create config using the modern API style
+    # Create config using the latest Ray API style (post-2.0)
     config = (
         AlgorithmConfig()
         .environment("chess_env")
         .framework("torch")
         
-        # Modern resource allocation for Ray 2.0+
+        # Resource allocation using latest API
         .resources(
             num_gpus=driver_gpus,  # Total GPUs for training
-            num_learner_workers=4,  # Number of remote learners
-            num_gpus_per_learner_worker=driver_gpus / 4,  # Distribute driver GPUs among learners
-            num_cpus_per_worker=cpus_per_worker,
-            num_gpus_per_worker=gpus_per_worker,
         )
         
-        # Rollout configuration
-        .rollouts(
-            num_rollout_workers=num_workers,
+        # Learner configuration (replaces num_learner_workers, etc.)
+        .learners(
+            num_learners=4,  # Number of remote learners
+            num_gpus_per_learner=driver_gpus / 4,  # Distribute driver GPUs among learners
+        )
+        
+        # Environment runners configuration (replaces rollouts)
+        .env_runners(
+            num_env_runners=num_workers,
             num_envs_per_worker=num_envs,
             rollout_fragment_length="auto",
             batch_mode="truncate_episodes",
+            num_cpus_per_env_runner=cpus_per_worker,
+            num_gpus_per_env_runner=gpus_per_worker,
         )
         
         # Training parameters - including PPO-specific parameters
@@ -600,7 +604,7 @@ def evaluate(args):
         model_config_dict={"fcnet_hiddens": []},
     )
     
-    # Create evaluation config
+    # Create evaluation config with the latest Ray API
     config = (
         AlgorithmConfig()
         .environment("chess_env")
@@ -609,13 +613,13 @@ def evaluate(args):
         # Resource configuration for evaluation
         .resources(
             num_gpus=1 if args.device == "cuda" else 0,
-            num_cpus_per_worker=1,
         )
         
-        # Minimal rollout setup for evaluation
-        .rollouts(
-            num_rollout_workers=0,
-            remote_worker_envs=False,
+        # Environment runner config for evaluation
+        .env_runners(
+            num_env_runners=0,
+            remote_env_runner_envs=False,
+            num_cpus_per_env_runner=1,
         )
         
         # Configure RLModule with masking for evaluation

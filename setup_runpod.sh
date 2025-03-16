@@ -126,7 +126,7 @@ RAY_VERSION_FLOAT = float(RAY_VERSION)
 
 print(f"Detected Ray version: {ray.__version__}")
 
-# If using Ray 2.9.0 or older code with newer Ray versions
+# If using newer Ray versions
 if RAY_VERSION_FLOAT > 2.9:
     try:
         # For newer Ray versions, provide backwards compatibility
@@ -138,6 +138,36 @@ if RAY_VERSION_FLOAT > 2.9:
         except ImportError:
             # Define compatibility classes if needed
             pass
+            
+        # Ray API naming changes from 2.0 to more recent versions
+        if RAY_VERSION_FLOAT >= 2.6:
+            print("Detected Ray 2.6+ with env_runners API")
+            
+            # Patch AlgorithmConfig for backwards compatibility
+            try:
+                from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
+                
+                # Store original methods
+                original_rollouts = getattr(AlgorithmConfig, "rollouts", None)
+                
+                # Add compatibility methods if needed
+                if not hasattr(AlgorithmConfig, "_rollouts_compat_added"):
+                    # Add a compatibility layer for rollouts -> env_runners
+                    if original_rollouts is None and hasattr(AlgorithmConfig, "env_runners"):
+                        def _rollouts_compat(self, *args, **kwargs):
+                            print("Using compatibility layer: rollouts -> env_runners")
+                            # Rename some kwargs for compatibility
+                            if "num_rollout_workers" in kwargs:
+                                kwargs["num_env_runners"] = kwargs.pop("num_rollout_workers")
+                            if "remote_worker_envs" in kwargs:
+                                kwargs["remote_env_runner_envs"] = kwargs.pop("remote_worker_envs")
+                            return self.env_runners(*args, **kwargs)
+                        
+                        setattr(AlgorithmConfig, "rollouts", _rollouts_compat)
+                        setattr(AlgorithmConfig, "_rollouts_compat_added", True)
+                        print("Added compatibility method: AlgorithmConfig.rollouts")
+            except Exception as e:
+                print(f"Warning: Failed to patch AlgorithmConfig: {e}")
     except Exception as e:
         print(f"Warning: Error setting up Ray compatibility layer: {e}")
 EOF
