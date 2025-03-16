@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Chess Reinforcement Learning using Ray RLlib.
-This implementation uses RLlib's built-in distributed training capabilities.
+This implementation uses RLlib's built-in distributed training capabilities with ConnectorV2 for reward adjustment.
 """
 # Standard library imports
 import argparse
@@ -15,20 +15,17 @@ import numpy as np
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
-from ray.rllib.callbacks.callbacks import RLlibCallback
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.connectors.connector_v2 import ConnectorV2
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.env.base_env import BaseEnv
-from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.models import ModelCatalog
 from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
-from ray.rllib.utils.typing import PolicyID, EpisodeType
+from ray.rllib.utils.typing import PolicyID
 from ray.tune.utils import merge_dicts
 from ray.rllib.core.columns import Columns
-from ray.rllib.core.rl_module.rl_module import RLModule
-
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -36,30 +33,82 @@ from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 # Framework-specific imports
 torch, nn = try_import_torch()
 
-class CustomPPO(PPO):
-    def postprocess_trajectory(self, sample_batch, other_agent_batches=None, episode=None):
-        print(f"Postprocessing batch keys: {list(sample_batch.keys())}")
-        sample_batch = super().postprocess_trajectory(sample_batch, other_agent_batches, episode)
-        print(f"After postprocessing: {list(sample_batch.keys())}")
-        return sample_batch
-    
-class ChessCombinedCallback(RLlibCallback):
+# Custom ConnectorV2 for reward adjustment
+class ChessRewardConnector(ConnectorV2):
+    def __call__(
+        self,
+        *,
+        rl_module: "RLModule",
+        data: dict,
+        episodes: list["EpisodeType"],
+        **kwargs
+    ) -> dict:
+        """
+        Adjust rewards in the data batch based on player perspective.
+        - Intermediate rewards alternate (White: as-is, Black: flipped).
+        - Terminal rewards: winner +1, loser -1.
+        """
+        rewards = data["rewards"]
+        dones = data["dones"]
+        infos = data["infos"]
+
+        # Adjust all rewards
+        adjusted_rewards = rewards.copy()
+
+        # Alternate intermediate rewards
+        for i in range(len(rewards)):
+            player = i % 2  # 0 for White, 1 for Black
+            if player == 1 and not dones[i]:  # Black’s turn, non-terminal
+                adjusted_rewards[i] = -adjusted_rewards[i]  # Flip sign
+
+        # Adjust terminal rewards
+        terminal_indices = np.where(dones)[0]
+        if len(terminal_indices) > 0:
+            terminal_index = terminal_indices[-1]  # Last terminal step
+            info = infos[terminal_index]
+
+            if "outcome" in info:
+                outcome = info["outcome"]
+                last_player = terminal_index % 2  # 0 for White, 1 for Black
+
+                if outcome == "white_win":
+                    if last_player == 0:  # White’s winning move
+                        adjusted_rewards[terminal_index] = 1.0
+                        if terminal_index > 0:
+                            adjusted_rewards[terminal_index - 1] = -1.0  # Black loses
+                    else:  # Rare case (White wins on Black’s turn)
+                        adjusted_rewards[terminal_index] = -1.0
+                        if terminal_index > 0:
+                            adjusted_rewards[terminal_index - 1] = 1.0
+                elif outcome == "black_win":
+                    if last_player == 1:  # Black’s winning move
+                        adjusted_rewards[terminal_index] = 1.0
+                        if terminal_index > 0:
+                            adjusted_rewards[terminal_index - 1] = -1.0  # White loses
+                    else:  # Rare case (Black wins on White’s turn)
+                        adjusted_rewards[terminal_index] = -1.0
+                        if terminal_index > 0:
+                            adjusted_rewards[terminal_index - 1] = 1.0
+                elif outcome == "draw":
+                    adjusted_rewards[terminal_index] = 0.0
+                    if terminal_index > 0:
+                        adjusted_rewards[terminal_index - 1] = 0.0
+
+        # Update the data batch
+        data["rewards"] = adjusted_rewards
+        return data
+
+# Metrics-only callback
+class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
         self,
         *,
-        episode: Union[EpisodeType, EpisodeV2],
-        env_runner: Optional["EnvRunner"] = None,
-        metrics_logger: Optional[MetricsLogger] = None,
-        env: Optional[gym.Env] = None,
-        env_index: int,
-        rl_module: Optional[RLModule] = None,
-        # TODO (sven): Deprecate these args.
-        worker: Optional["EnvRunner"] = None,
-        base_env: Optional[BaseEnv] = None,
-        policies: Optional[Dict[PolicyID, Policy]] = None,
-        **kwargs,
+        worker: "RolloutWorker",
+        base_env: BaseEnv,
+        policies: dict[PolicyID, "Policy"],
+        episode: "SingleAgentEpisode",
+        **kwargs
     ) -> None:
-        # Metrics tracking
         metrics = {
             "white_win": 0.0,
             "black_win": 0.0,
@@ -67,7 +116,6 @@ class ChessCombinedCallback(RLlibCallback):
             "checkmate": 0.0,
             "stalemate": 0.0,
         }
-
         infos = episode.get_infos()
         info = infos[-1] if infos else {}
         if "outcome" in info:
@@ -78,55 +126,17 @@ class ChessCombinedCallback(RLlibCallback):
                 metrics["black_win"] = 1.0
             elif outcome == "draw":
                 metrics["draw"] = 1.0
-
         if "termination_reason" in info:
             reason = info["termination_reason"]
             if reason == "checkmate":
                 metrics["checkmate"] = 1.0
             elif reason == "stalemate":
                 metrics["stalemate"] = 1.0
-
-        # Log metrics
         for key, value in metrics.items():
             episode.custom_metrics[key] = value
 
-    def on_postprocess_trajectory(
-        self,
-        *,
-        worker: "RolloutWorker",
-        episodes: list,
-        agent_id: str,
-        policy_id: PolicyID,
-        policies: dict[PolicyID, "Policy"],
-        postprocessed_batch: dict,
-        original_batches: dict,
-        **kwargs
-    ) -> dict:
-        # Reward flipping
-        batch = postprocessed_batch
-
-        # Identify the terminal step
-        dones = batch["dones"]
-        terminal_indices = np.where(dones)[0]
-        if len(terminal_indices) > 0:
-            terminal_index = terminal_indices[-1]  # Last terminal step
-
-            # Check game outcome and adjust reward
-            info = batch["infos"][terminal_index]
-            if "black_won" in info and info["black_won"]:
-                # Flip reward to +1.0 if black won
-                batch["rewards"][terminal_index] = 1.0
-            elif "white_won" in info and info["white_won"]:
-                # Ensure white win is +1.0
-                batch["rewards"][terminal_index] = 1.0
-            elif "draw" in info and info["draw"]:
-                # Set draw to 0.0
-                batch["rewards"][terminal_index] = 0.0
-
-        return batch
-
 class ChessMaskingRLModule(TorchRLModule):
-    def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False, **kwargs):
+    def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False):
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
@@ -172,21 +182,14 @@ class ChessMaskingRLModule(TorchRLModule):
         masked_logits = action_logits + (action_mask - 1) * 1e9  # Large negative for invalid actions
         value = self.value_head(features).view(batch_size, 1)
         
-        # Create action distribution and sample actions
-        action_dist = torch.distributions.Categorical(logits=masked_logits)
-        actions = action_dist.sample()
-        
-        # Calculate log probabilities of sampled actions
-        action_log_probs = action_dist.log_prob(actions)
-        
-        # Return required fields including Columns.ACTIONS and Columns.ACTION_LOGP
         return {
-            Columns.ACTIONS: actions,
+            Columns.ACTIONS: torch.distributions.Categorical(logits=masked_logits).sample(),
             Columns.ACTION_DIST_INPUTS: masked_logits,
-            Columns.ACTION_LOGP: action_log_probs,
+            Columns.ACTION_LOGP: torch.distributions.Categorical(logits=masked_logits).log_prob(
+                torch.distributions.Categorical(logits=masked_logits).sample()
+            ),
             Columns.VF_PREDS: value
         }
-
 
 def create_rllib_chess_env(config):
     env = ChessEnv()
@@ -217,7 +220,6 @@ def create_rllib_chess_env(config):
                     "action_mask": np.ones(self.action_space.n, dtype=np.float32),
                     "white_to_move": 1
                 }
-            # Ensure float32 to match observation space
             return {
                 "board": np.asarray(obs["board"], dtype=np.float32),
                 "action_mask": np.asarray(obs["action_mask"], dtype=np.float32),
@@ -225,7 +227,6 @@ def create_rllib_chess_env(config):
             }
 
     return DictObsWrapper(env)
-
 
 def train(args):
     if args.device == "cuda" and not args.force_cpu:
@@ -244,20 +245,23 @@ def train(args):
         include_dashboard=args.dashboard,
         _redis_password=args.redis_password,
         num_cpus=118,
-        num_gpus=gpu_count,  # Explicitly declare GPUs
+        num_gpus=gpu_count,
     )
 
     # Resource configuration
     num_env_runners = 1
-    driver_gpus = .5
+    driver_gpus = 0.5
     num_cpus_per_env_runner = 4
-    num_gpus_per_env_runner = .5
+    num_gpus_per_env_runner = 0.5
     num_envs_per_env_runner = 4
     num_learners = 3
     num_gpus_per_learner = 1
-    
 
+    # Register the environment and connector
     tune.register_env("chess_env", create_rllib_chess_env)
+    from ray.rllib.env.env_runner import EnvRunner
+    EnvRunner.add_connector("chess_reward_connector", ChessRewardConnector)
+
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -292,7 +296,8 @@ def train(args):
             num_envs_per_env_runner=num_envs_per_env_runner,
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
-            sample_timeout_s=None
+            sample_timeout_s=None,
+            connector_config=["chess_reward_connector"]  # Add the custom connector
         )
         .training(
             train_batch_size_per_learner=4096,
@@ -315,25 +320,23 @@ def train(args):
             enable_rl_module_and_learner=True,
             enable_env_runner_and_connector_v2=True
         )
-        
     )
 
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
 
     analysis = tune.run(
-        CustomPPO,
+        "PPO",  # Use default PPO since CustomPPO was for old API debugging
         stop={"training_iteration": args.max_iterations},
         checkpoint_freq=25,
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=2,
-        config=config,
+        config=config.to_dict(),  # Convert to dict for tune.run
         resume="AUTO",
         restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
     )
 
     return analysis.best_checkpoint
-
 
 def evaluate(args):
     if not args.checkpoint or not os.path.exists(args.checkpoint):
@@ -365,7 +368,7 @@ def evaluate(args):
         .rl_module(rl_module_spec=rl_module_spec)
         .exploration(explore=False)
         .training(lambda_=0.95, num_epochs=0)
-        .experimental(_enable_new_api_stack=True)
+        .api_stack(enable_rl_module_and_learner=True, enable_env_runner_and_connector_v2=True)
     )
 
     algo = PPO(config=config)
@@ -396,7 +399,6 @@ def evaluate(args):
     env.close()
     ray.shutdown()
 
-
 def main():
     parser = argparse.ArgumentParser(description="Chess RL training using RLlib")
     parser.add_argument("--mode", choices=["train", "eval"], default="train")
@@ -417,7 +419,6 @@ def main():
         train(args)
     else:
         evaluate(args)
-
 
 if __name__ == "__main__":
     main()
