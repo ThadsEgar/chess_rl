@@ -58,7 +58,7 @@ class ChessRewardConnector(ConnectorV2):
         # Alternate intermediate rewards
         for i in range(len(rewards)):
             player = i % 2  # 0 for White, 1 for Black
-            if player == 1 and not dones[i]:  # Black’s turn, non-terminal
+            if player == 1 and not dones[i]:  # Black's turn, non-terminal
                 adjusted_rewards[i] = -adjusted_rewards[i]  # Flip sign
 
         # Adjust terminal rewards
@@ -72,20 +72,20 @@ class ChessRewardConnector(ConnectorV2):
                 last_player = terminal_index % 2  # 0 for White, 1 for Black
 
                 if outcome == "white_win":
-                    if last_player == 0:  # White’s winning move
+                    if last_player == 0:  # White's winning move
                         adjusted_rewards[terminal_index] = 1.0
                         if terminal_index > 0:
                             adjusted_rewards[terminal_index - 1] = -1.0  # Black loses
-                    else:  # Rare case (White wins on Black’s turn)
+                    else:  # Rare case (White wins on Black's turn)
                         adjusted_rewards[terminal_index] = -1.0
                         if terminal_index > 0:
                             adjusted_rewards[terminal_index - 1] = 1.0
                 elif outcome == "black_win":
-                    if last_player == 1:  # Black’s winning move
+                    if last_player == 1:  # Black's winning move
                         adjusted_rewards[terminal_index] = 1.0
                         if terminal_index > 0:
                             adjusted_rewards[terminal_index - 1] = -1.0  # White loses
-                    else:  # Rare case (Black wins on White’s turn)
+                    else:  # Rare case (Black wins on White's turn)
                         adjusted_rewards[terminal_index] = -1.0
                         if terminal_index > 0:
                             adjusted_rewards[terminal_index - 1] = 1.0
@@ -228,6 +228,11 @@ def create_rllib_chess_env(config):
 
     return DictObsWrapper(env)
 
+# Define a function to create an env-to-module connector pipeline using the ChessRewardConnector
+def make_chess_reward_connector(env):
+    # Return a single ConnectorV2 object or a list of ConnectorV2 objects
+    return [ChessRewardConnector()]
+
 def train(args):
     if args.device == "cuda" and not args.force_cpu:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -257,10 +262,8 @@ def train(args):
     num_learners = 3
     num_gpus_per_learner = 1
 
-    # Register the environment and connector
+    # Register the environment
     tune.register_env("chess_env", create_rllib_chess_env)
-    from ray.rllib.env.env_runner import EnvRunner
-    EnvRunner.add_connector("chess_reward_connector", ChessRewardConnector)
 
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -297,7 +300,7 @@ def train(args):
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
             sample_timeout_s=None,
-            connector_config=["chess_reward_connector"]  # Add the custom connector
+            env_to_module_connector=make_chess_reward_connector
         )
         .training(
             train_batch_size_per_learner=4096,
