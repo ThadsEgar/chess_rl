@@ -24,8 +24,10 @@ from ray.rllib.models import ModelCatalog
 from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
+from ray.rllib.utils.typing import PolicyID
 from ray.tune.utils import merge_dicts
 from ray.rllib.core.columns import Columns
+
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 
@@ -43,13 +45,13 @@ class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
         self,
         *,
-        worker,
+        worker: "RolloutWorker",
         base_env: BaseEnv,
-        policies,
+        policies: dict[PolicyID, "Policy"],
         episode: EpisodeV2,
         **kwargs
     ) -> None:
-        # Metrics tracking (from ChessMetricsCallback)
+        # Metrics tracking
         metrics = {
             "white_win": 0.0,
             "black_win": 0.0,
@@ -82,16 +84,16 @@ class ChessCombinedCallback(DefaultCallbacks):
     def on_postprocess_trajectory(
         self,
         *,
-        worker,
-        episodes,
-        agent_id,
-        policy_id,
-        policies,
-        postprocessed_batch,
-        original_batches,
+        worker: "RolloutWorker",
+        episodes: list,
+        agent_id: str,
+        policy_id: PolicyID,
+        policies: dict[PolicyID, "Policy"],
+        postprocessed_batch: dict,
+        original_batches: dict,
         **kwargs
-    ):
-        # Reward flipping (from ChessRewardFlipCallback)
+    ) -> dict:
+        # Reward flipping
         batch = postprocessed_batch
 
         # Identify the terminal step
@@ -106,7 +108,7 @@ class ChessCombinedCallback(DefaultCallbacks):
                 # Flip reward to +1.0 if black won
                 batch["rewards"][terminal_index] = 1.0
             elif "white_won" in info and info["white_won"]:
-                # Ensure white win is +1.0 (optional, depending on env)
+                # Ensure white win is +1.0
                 batch["rewards"][terminal_index] = 1.0
             elif "draw" in info and info["draw"]:
                 # Set draw to 0.0
