@@ -119,7 +119,7 @@ class ChessMaskingRLModule(TorchRLModule):
         self.policy_head = nn.Linear(832, self.action_space_n)
         self.value_head = nn.Linear(832, 1)
         
-    def forward(self, batch):
+    def _forward(self, batch):
         obs = batch.get("obs", batch)
         board = obs["board"]
         action_mask = obs["action_mask"]
@@ -143,9 +143,7 @@ class ChessMaskingRLModule(TorchRLModule):
         
         # Return required fields including Columns.ACTIONS
         return {
-            Columns.ACTION_DIST_INPUTS: masked_logits,
             Columns.ACTIONS: actions,
-            "vf_preds": value
         }
 
 
