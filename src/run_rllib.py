@@ -39,9 +39,49 @@ class CustomPPO(PPO):
         print(f"After postprocessing: {list(sample_batch.keys())}")
         return sample_batch
     
-class ChessRewardFlipCallback(DefaultCallbacks):
+class ChessCombinedCallback(DefaultCallbacks):
+    def on_episode_end(
+        self,
+        *,
+        worker,
+        base_env: BaseEnv,
+        policies,
+        episode: EpisodeV2,
+        **kwargs
+    ) -> None:
+        # Metrics tracking (from ChessMetricsCallback)
+        metrics = {
+            "white_win": 0.0,
+            "black_win": 0.0,
+            "draw": 0.0,
+            "checkmate": 0.0,
+            "stalemate": 0.0,
+        }
+
+        info = episode.get_last_info() or {}
+        if "outcome" in info:
+            outcome = info["outcome"]
+            if outcome == "white_win":
+                metrics["white_win"] = 1.0
+            elif outcome == "black_win":
+                metrics["black_win"] = 1.0
+            elif outcome == "draw":
+                metrics["draw"] = 1.0
+
+        if "termination_reason" in info:
+            reason = info["termination_reason"]
+            if reason == "checkmate":
+                metrics["checkmate"] = 1.0
+            elif reason == "stalemate":
+                metrics["stalemate"] = 1.0
+
+        # Log metrics
+        for key, value in metrics.items():
+            episode.custom_metrics[key] = value
+
     def on_postprocess_trajectory(
         self,
+        *,
         worker,
         episodes,
         agent_id,
@@ -51,86 +91,28 @@ class ChessRewardFlipCallback(DefaultCallbacks):
         original_batches,
         **kwargs
     ):
-        # Access the sample batch
+        # Reward flipping (from ChessRewardFlipCallback)
         batch = postprocessed_batch
 
-        # Identify the terminal step (where the episode ends)
+        # Identify the terminal step
         dones = batch["dones"]
         terminal_indices = np.where(dones)[0]
         if len(terminal_indices) > 0:
-            terminal_index = terminal_indices[-1]  # Take the last terminal step
+            terminal_index = terminal_indices[-1]  # Last terminal step
 
-            # Check the game outcome from the info dictionary
+            # Check game outcome and adjust reward
             info = batch["infos"][terminal_index]
             if "black_won" in info and info["black_won"]:
-                # If black won, flip the terminal reward to +1.0
+                # Flip reward to +1.0 if black won
                 batch["rewards"][terminal_index] = 1.0
             elif "white_won" in info and info["white_won"]:
-                # If white won, no flip needed (assuming it’s already set appropriately)
-                pass
+                # Ensure white win is +1.0 (optional, depending on env)
+                batch["rewards"][terminal_index] = 1.0
             elif "draw" in info and info["draw"]:
-                # If it’s a draw, set reward to 0.0
+                # Set draw to 0.0
                 batch["rewards"][terminal_index] = 0.0
 
         return batch
-
-
-class ChessMetricsCallback(DefaultCallbacks):
-    def on_episode_end(
-        self,
-        *,
-        episode: Union[EpisodeV2, object],
-        env_runner: Optional["EnvRunner"] = None,
-        metrics_logger: Optional[MetricsLogger] = None,
-        env: Optional[gym.Env] = None,
-        env_index: int,
-        rl_module: Optional["RLModule"] = None,
-        worker: Optional["EnvRunner"] = None,
-        base_env: Optional[BaseEnv] = None,
-        policies: Optional[Dict[str, Policy]] = None,
-        **kwargs,
-    ) -> None:
-        metrics = {
-            "white_win": 0.0,
-            "black_win": 0.0,
-            "draw": 0.0,
-            "checkmate": 0.0,
-            "stalemate": 0.0,
-        }
-
-        try:
-            if hasattr(episode, "get_last_info"):
-                info = episode.get_last_info() or {}
-            elif hasattr(episode, "infos") and episode.infos:
-                info = episode.infos[-1]
-            else:
-                info = {}
-
-            if "outcome" in info:
-                outcome = info["outcome"]
-                if outcome == "white_win":
-                    metrics["white_win"] = 1.0
-                elif outcome == "black_win":
-                    metrics["black_win"] = 1.0
-                elif outcome == "draw":
-                    metrics["draw"] = 1.0
-
-            if "termination_reason" in info:
-                reason = info["termination_reason"]
-                if reason == "checkmate":
-                    metrics["checkmate"] = 1.0
-                elif reason == "stalemate":
-                    metrics["stalemate"] = 1.0
-
-            if metrics_logger:
-                for key, value in metrics.items():
-                    metrics_logger.log_value(key, value)
-
-        except Exception as e:
-            print(f"Error in on_episode_end callback: {e}")
-            import traceback
-            traceback.print_exc()
-
 
 class ChessMaskingRLModule(TorchRLModule):
     def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False, **kwargs):
@@ -316,7 +298,7 @@ def train(args):
             kl_coeff=0.2,
             vf_share_layers=False,
         )
-        .callbacks([ChessMetricsCallback, ChessRewardFlipCallback])
+        .callbacks(ChessCombinedCallback)
         .rl_module(rl_module_spec=rl_module_spec)
         .api_stack(
             enable_rl_module_and_learner=True,
