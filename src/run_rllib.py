@@ -113,11 +113,17 @@ class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
         self,
         *,
-        worker: "RolloutWorker",
-        base_env: BaseEnv,
-        policies: dict[PolicyID, "Policy"],
-        episode: "SingleAgentEpisode",
-        **kwargs
+        episode: Union[EpisodeType, EpisodeV2],
+        env_runner: Optional["EnvRunner"] = None,
+        metrics_logger: Optional[MetricsLogger] = None,
+        env: Optional[gym.Env] = None,
+        env_index: int,
+        rl_module: Optional[RLModule] = None,
+        # TODO (sven): Deprecate these args.
+        worker: Optional["EnvRunner"] = None,
+        base_env: Optional[BaseEnv] = None,
+        policies: Optional[Dict[PolicyID, Policy]] = None,
+        **kwargs,
     ) -> None:
         metrics = {
             "white_win": 0.0,
