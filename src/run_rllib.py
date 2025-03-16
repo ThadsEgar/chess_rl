@@ -24,9 +24,11 @@ from ray.rllib.models import ModelCatalog
 from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
-from ray.rllib.utils.typing import PolicyID
+from ray.rllib.utils.typing import PolicyID, EpisodeType
 from ray.tune.utils import merge_dicts
 from ray.rllib.core.columns import Columns
+from ray.rllib.core.rl_module.rl_module import RLModule
+
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
