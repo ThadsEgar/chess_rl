@@ -15,7 +15,7 @@ import numpy as np
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
-from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.callbacks.callbacks import RLlibCallback
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.env.base_env import BaseEnv
@@ -41,7 +41,7 @@ class CustomPPO(PPO):
         print(f"After postprocessing: {list(sample_batch.keys())}")
         return sample_batch
     
-class ChessCombinedCallback(DefaultCallbacks):
+class ChessCombinedCallback(RLlibCallback):
     def on_episode_end(
         self,
         *,
