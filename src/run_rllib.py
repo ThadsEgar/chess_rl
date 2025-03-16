@@ -219,7 +219,6 @@ def train(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config_dict={"fcnet_hiddens": []},
     )
 
     config = (
