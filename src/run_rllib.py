@@ -149,7 +149,7 @@ class ChessMaskingRLModule(TorchRLModule):
             Columns.ACTIONS: actions,
             Columns.ACTION_DIST_INPUTS: masked_logits,
             Columns.ACTION_LOGP: action_log_probs,
-            "vf_preds": value
+            Columns.VF_PREDS: value
         }
 
 
