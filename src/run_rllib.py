@@ -30,6 +30,8 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.policy import Policy
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.utils.typing import AgentID, EnvType, EpisodeType, PolicyID
+from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
+from ray.tune.utils import merge_dicts
 
 
 torch, nn = try_import_torch()
@@ -52,41 +54,144 @@ class ChessMetricsCallback(DefaultCallbacks):
     ) -> None:
         # Store metrics in user_data
         metrics = {}
-        info = episode.infos[-1]
-        if "outcome" in info:
-            outcome = info["outcome"]
-            if outcome == "white_win":
-                metrics["white_win"] = 1.0
-                metrics["black_win"] = 0.0
-                metrics["draw"] = 0.0
-            elif outcome == "black_win":
-                metrics["white_win"] = 0.0
-                metrics["black_win"] = 1.0
-                metrics["draw"] = 0.0
-            elif outcome == "draw":
-                metrics["white_win"] = 0.0
-                metrics["black_win"] = 0.0
-                metrics["draw"] = 1.0
+        
+        # Handle different episode versions (EpisodeV2 vs old Episode)
+        try:
+            # Get the last info - different access methods based on Ray version
+            if hasattr(episode, "get_last_info"):
+                # New Ray 2.0+ with EpisodeV2
+                info = episode.get_last_info()
+                print("Using EpisodeV2 interface")
+            elif hasattr(episode, "infos") and len(episode.infos) > 0:
+                # Old Ray interface
+                info = episode.infos[-1]
+                print("Using legacy Episode interface")
+            else:
+                # Fallback
+                info = {}
+                print("Unable to get episode info, using empty dict")
+            
+            # Process game outcome
+            if "outcome" in info:
+                outcome = info["outcome"]
+                if outcome == "white_win":
+                    metrics["white_win"] = 1.0
+                    metrics["black_win"] = 0.0
+                    metrics["draw"] = 0.0
+                elif outcome == "black_win":
+                    metrics["white_win"] = 0.0
+                    metrics["black_win"] = 1.0
+                    metrics["draw"] = 0.0
+                elif outcome == "draw":
+                    metrics["white_win"] = 0.0
+                    metrics["black_win"] = 0.0
+                    metrics["draw"] = 1.0
 
-            if "termination_reason" in info:
-                reason = info["termination_reason"]
-                if reason == "checkmate":
-                    metrics["checkmate"] = 1.0
-                elif reason == "stalemate":
-                    metrics["stalemate"] = 1.0
-                # ... other reasons ...
-                
-        if hasattr(episode, 'last_batch'):
-            print(f"Episode batch keys: {episode.last_batch.keys()}")
-        elif hasattr(episode, 'batch'):
-            print(f"Episode batch keys: {episode.batch.keys()}")
+                if "termination_reason" in info:
+                    reason = info["termination_reason"]
+                    if reason == "checkmate":
+                        metrics["checkmate"] = 1.0
+                    elif reason == "stalemate":
+                        metrics["stalemate"] = 1.0
+                    # ... other reasons ...
+            
+            # Debug: print available batch information
+            if hasattr(episode, 'last_batch'):
+                print(f"Episode has last_batch with keys: {episode.last_batch.keys()}")
+            elif hasattr(episode, 'batch'):
+                print(f"Episode has batch with keys: {episode.batch.keys()}")
+            elif hasattr(episode, 'get_batch'):
+                # For EpisodeV2
+                try:
+                    batch = episode.get_batch()
+                    print(f"Episode batch from get_batch(): {list(batch.keys())}")
+                except Exception as e:
+                    print(f"Error getting batch with get_batch(): {e}")
+            else:
+                print(f"Episode object type: {type(episode)}")
+
+            # Optionally log to metrics_logger if available
+            if metrics_logger:
+                for key, value in metrics.items():
+                    metrics_logger.log_value(key, value)
+                    
+        except Exception as e:
+            print(f"Error in on_episode_end callback: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+# Define a new RLModule for Chess with masking
+class ChessMaskingRLModule(TorchRLModule):
+    def __init__(self, observation_space=None, action_space=None, inference_only=False, learner_only=False, model_config=None, **kwargs):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            inference_only=inference_only,
+            learner_only=learner_only,
+            model_config=model_config or {}
+        )
+        
+        # Get shape information from observation space
+        if isinstance(observation_space, gym.spaces.Dict):
+            self.board_shape = observation_space["board"].shape
         else:
-            print(episode)            
-
-        # Optionally log to metrics_logger if available
-        if metrics_logger:
-            for key, value in metrics.items():
-                metrics_logger.log_value(key, value)
+            self.board_shape = (13, 8, 8)  # Default shape
+            
+        self.board_channels = self.board_shape[0]  # 13 channels (6 piece types x 2 colors + empty)
+        self.action_space_n = action_space.n
+        
+        # Feature extractor CNN - same architecture as before
+        self.features_extractor = nn.Sequential(
+            nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, 832),
+            nn.ReLU(),
+        )
+        
+        # Policy and value heads
+        self.policy_head = nn.Linear(832, self.action_space_n)
+        self.value_head = nn.Linear(832, 1)
+        
+    def forward(self, batch):
+        """Forward pass - simplified for the new API, RLlib handles masking"""
+        # Extract the board from observations
+        if isinstance(batch, dict) and 'obs' in batch:
+            obs = batch['obs']
+            if isinstance(obs, dict) and 'board' in obs:
+                board = obs['board']
+            else:
+                device = next(self.parameters()).device
+                board = torch.zeros((batch.shape[0], 13, 8, 8), device=device)
+        else:
+            device = next(self.parameters()).device
+            board = torch.zeros((1, 13, 8, 8), device=device)
+        
+        # Ensure board has batch dimension
+        if len(board.shape) == 3:
+            board = board.unsqueeze(0)
+            
+        batch_size = board.shape[0]
+        
+        # Process through CNN
+        features = self.features_extractor(board)
+        features = features + 1e-8  # Avoid NaN issues
+        
+        # Get action logits and values
+        action_logits = self.policy_head(features)
+        value = self.value_head(features).view(batch_size, 1)
+        
+        # Return the minimal outputs needed - RLlib will handle masking using the action_mask in obs
+        return {
+            "action_dist_inputs": action_logits,
+            "vf_preds": value
+        }
 
 
 def create_rllib_chess_env(config):
@@ -145,7 +250,7 @@ def create_rllib_chess_env(config):
                     print(f"Warning: Invalid observation {type(obs)}, using placeholder")
                     return {
                         'board': np.zeros((13, 8, 8), dtype=np.float32),
-                        'action_mask': np.ones(self.env.action_space.n, dtype=np.float32),
+                        'action_mask': np.ones(self.action_space.n, dtype=np.float32),
                         'white_to_move': 1
                     }
                 board = np.asarray(obs['board'], dtype=np.float32)
@@ -347,67 +452,94 @@ def train(args):
         else:
             print(f"Warning: Checkpoint path {args.checkpoint} does not exist. Starting fresh.")
 
-    # Create config using RLlib's built-in CNN model
-    config = {
-        "env": "chess_env",
-        "framework": "torch",
-        "disable_env_checking": True,
-        "_enable_rl_module_api": False,  # Turn OFF RL module API - we're using built-in models
-        "_enable_learner_api": True,
-        "num_workers": 12,
-        "num_cpus_per_env_runner": 4,
-        "num_gpus_per_learner": 1.0,
-        "num_learners": 4,
-        "train_batch_size": 4096,
-        "sgd_minibatch_size": 256,
-        "num_sgd_iter": 10,
-        "lr": 5e-5,
-        "grad_clip": 1.0,
-        "entropy_coeff": args.entropy_coeff,
-        "sample_timeout_s": 600,  # 10 minute timeout
-        "rollout_fragment_length": "auto",  # Smaller fragments for faster iteration
-        "num_envs_per_env_runner": 4,
-        "batch_mode": "truncate_episodes",
-        "callbacks": ChessMetricsCallback,
-        
-        # PPO-specific parameters
-        "gamma": 0.99,  # Discount factor
-        "lambda": 0.95,  # GAE lambda parameter
-        "use_gae": True,  # Use Generalized Advantage Estimation
-        "vf_loss_coeff": 0.5,  # Value function loss coefficient
-        "kl_coeff": 0.2,  # Initial KL coefficient
-        "clip_param": 0.2,  # PPO clip parameter
-        
-        # Value bootstrapping - CRITICAL for advantage calculation
-        "vtrace": False,  # Don't use V-trace (not needed for PPO)
-        "vf_share_layers": False,  # Use separate value network
-        "normalize_actions": False,  # Don't normalize actions (chess is discrete)
-        
-        # *** IMPORTANT: Configure built-in CNN model with masking ***
-        "model": {
-            # Define CNN architecture
-            "conv_filters": [
-                [128, [3, 3], 1],  # 128 filters, 3x3 kernel, stride 1
-                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
-                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
-            ],
-            "post_fcnet_hiddens": [832],  # Hidden layer after CNN (equiv. to our 832 in custom model)
-            "custom_action_dist": "masked",  # CRITICAL: Use masked action distribution
-            "custom_model": "mask",  # Use RLlib's built-in masking model
-        },
-        
-        # Postprocessing
-        "preprocessor_pref": None,  # No preprocessor
-        "observation_filter": "NoFilter",  # No observation normalization
-    }
+    # Define the observation space
+    observation_space = spaces.Dict({
+        'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
+        'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32),
+        'white_to_move': spaces.Discrete(2)
+    })
+
+    # Define the action space
+    action_space = spaces.Discrete(20480)
+
+    # Create RLModuleSpec for our chess module
+    rl_module_spec = RLModuleSpec(
+        module_class=ChessMaskingRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config_dict={"fcnet_hiddens": []},  # Empty, we define our own architecture
+    )
     
-    print("\n===== Using RLlib's Built-in CNN Model =====")
-    print("CNN Architecture:")
-    for layer in config["model"]["conv_filters"]:
-        print(f"  {layer[0]} filters, {layer[1]}x{layer[1]} kernel, stride {layer[2]}")
-    print(f"FC Layers: {config['model']['post_fcnet_hiddens']}")
-    print(f"Using built-in masked action distribution")
-    print("============================================\n")
+    # Create config using the modern API style
+    config = (
+        AlgorithmConfig()
+        .environment("chess_env")
+        .framework("torch")
+        
+        # Modern resource allocation for Ray 2.0+
+        .resources(
+            num_gpus=driver_gpus,  # Total GPUs for training
+            num_learner_workers=4,  # Number of remote learners
+            num_gpus_per_learner_worker=driver_gpus / 4,  # Distribute driver GPUs among learners
+            num_cpus_per_worker=cpus_per_worker,
+            num_gpus_per_worker=gpus_per_worker,
+        )
+        
+        # Rollout configuration
+        .rollouts(
+            num_rollout_workers=num_workers,
+            num_envs_per_worker=num_envs,
+            rollout_fragment_length="auto",
+            batch_mode="truncate_episodes",
+        )
+        
+        # Training parameters
+        .training(
+            # Use the predefined batch sizes calculated based on hardware
+            train_batch_size=4096,
+            sgd_minibatch_size=256,
+            num_sgd_iter=10,
+            lr=5e-5,
+            grad_clip=1.0,
+            _tf_policy_handles_more_than_one_loss=True,
+            model={"vf_share_layers": False},
+        )
+        
+        # Add callbacks
+        .callbacks(ChessMetricsCallback)
+        
+        # Configure RLModule with masking
+        .rl_module(
+            rl_module_spec=rl_module_spec,
+            # Enable masking through action distribution
+            action_distribution_config={"action_mask_key": "action_mask"},
+        )
+        
+        # Other settings
+        .debugging(disable_env_checking=True)
+        .multi_agent(enable_correction=True)  # Support for newer Ray versions
+        .experimental(_enable_new_api_stack=True)
+    )
+    
+    # Add PPO-specific parameters
+    config = merge_dicts(
+        config.to_dict(),
+        {
+            "entropy_coeff": args.entropy_coeff,
+            "gamma": 0.99,
+            "lambda": 0.95,
+            "use_gae": True,
+            "vf_loss_coeff": 0.5,
+            "kl_coeff": 0.2,
+            "clip_param": 0.2,
+            "vtrace": False,
+        }
+    )
+    
+    print("\n===== Using New RLlib API Stack with RLModule =====")
+    print("Using custom ChessMaskingRLModule with masking support")
+    print("Using the newer RLlib configuration API")
+    print("================================================\n")
     
     analysis = tune.run(
         "PPO",
@@ -447,26 +579,55 @@ def evaluate(args):
     # Register only the environment
     tune.register_env("chess_env", create_rllib_chess_env)
     
-    # Create evaluation configuration with built-in CNN model
-    config = {
-        "env": "chess_env",
-        "framework": "torch",
-        "num_workers": 0,  # Single worker for evaluation
-        "num_gpus": 1 if args.device == "cuda" else 0,  # Use exact integers for GPU allocation
-        # Use built-in model with masking
-        "model": {
-            "conv_filters": [
-                [128, [3, 3], 1],  # 128 filters, 3x3 kernel, stride 1
-                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
-                [256, [3, 3], 1],  # 256 filters, 3x3 kernel, stride 1
-            ],
-            "post_fcnet_hiddens": [832],
-            "custom_action_dist": "masked",
-            "custom_model": "mask",
-        },
-        # Critical: Ensure we're using deterministic actions (no exploration)
-        "explore": False,
-    }
+    # Define the observation space
+    observation_space = spaces.Dict({
+        'board': spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
+        'action_mask': spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32),
+        'white_to_move': spaces.Discrete(2)
+    })
+
+    # Define the action space
+    action_space = spaces.Discrete(20480)
+    
+    # Create RLModuleSpec for evaluation
+    rl_module_spec = RLModuleSpec(
+        module_class=ChessMaskingRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config_dict={"fcnet_hiddens": []},
+    )
+    
+    # Create evaluation config
+    config = (
+        AlgorithmConfig()
+        .environment("chess_env")
+        .framework("torch")
+        
+        # Resource configuration for evaluation
+        .resources(
+            num_gpus=1 if args.device == "cuda" else 0,
+            num_cpus_per_worker=1,
+        )
+        
+        # Minimal rollout setup for evaluation
+        .rollouts(
+            num_rollout_workers=0,
+            remote_worker_envs=False,
+        )
+        
+        # Configure RLModule with masking for evaluation
+        .rl_module(
+            rl_module_spec=rl_module_spec,
+            action_distribution_config={"action_mask_key": "action_mask"},
+        )
+        
+        # Disable exploration for deterministic evaluation
+        .exploration(explore=False)
+        
+        # Enable newer API support
+        .experimental(_enable_new_api_stack=True)
+        .multi_agent(enable_correction=True)
+    )
     
     print(f"Loading checkpoint from: {args.checkpoint}")
     # Create algorithm and restore from checkpoint

@@ -108,15 +108,15 @@ echo "Installing core scientific packages with conda..."
 conda install -y matplotlib pandas numpy scipy
 
 # Install Ray and RLlib
-echo "Installing Ray and RLlib..."
-# Try specific version first, then fall back to latest if not available
-pip install "ray[rllib]==2.9.0" "ray[default]" || {
-    echo "Ray 2.9.0 not available, installing latest version..."
-    pip install "ray[rllib]" "ray[default]"
-    
-    # Create a compatibility patch for older code
-    mkdir -p $REPO_DIR/src/compat
-    cat > $REPO_DIR/src/compat/__init__.py << 'EOF'
+echo "Installing Ray and RLlib (latest version)..."
+pip install "ray[rllib]" "ray[default]" "ray[tune]"
+
+# Check Ray installation
+python -c "import ray; print('Ray installed successfully. Version:', ray.__version__)"
+
+# Create compatibility layer for different Ray versions
+mkdir -p $REPO_DIR/src/compat
+cat > $REPO_DIR/src/compat/__init__.py << 'EOF'
 # Compatibility layer for different Ray versions
 import ray
 
@@ -141,12 +141,6 @@ if RAY_VERSION_FLOAT > 2.9:
     except Exception as e:
         print(f"Warning: Error setting up Ray compatibility layer: {e}")
 EOF
-    
-    echo "Created Ray version compatibility layer in src/compat"
-}
-
-# Check Ray installation
-python -c "import ray; print('Ray installed successfully. Version:', ray.__version__)"
 
 # Install Gymnasium and related packages
 echo "Installing Gymnasium and dependencies..."
