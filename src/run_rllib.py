@@ -491,13 +491,13 @@ def train(args):
             num_gpus=driver_gpus,  # Total GPUs for training
         )
         
-        # Learner configuration (replaces num_learner_workers, etc.)
+        # Learner configuration
         .learners(
             num_learners=4,  # Number of remote learners
             num_gpus_per_learner=driver_gpus / 4,  # Distribute driver GPUs among learners
         )
         
-        # Environment runners configuration (replaces rollouts)
+        # Environment runners configuration
         .env_runners(
             num_env_runners=num_workers,
             num_envs_per_env_runner=num_envs,
@@ -507,23 +507,26 @@ def train(args):
             num_gpus_per_env_runner=gpus_per_worker,
         )
         
-        # Training parameters - including PPO-specific parameters
+        # Training parameters - PPO-specific
         .training(
-            # Use the predefined batch sizes calculated based on hardware
+            # Batch sizes
             train_batch_size_per_learner=4096,
             minibatch_size=256,
             num_epochs=10,
+            
+            # Learning parameters
             lr=5e-5,
             grad_clip=1.0,
             gamma=0.99,
-            lambda_=0.95,  # Note: using lambda_ not lambda which is a Python keyword
             use_gae=True,
+            **{"lambda": 0.95},  # Must use dict unpacking since lambda is a Python keyword
+            
+            # PPO-specific parameters
             vf_loss_coeff=0.5,
             entropy_coeff=args.entropy_coeff,
             clip_param=0.2,
             kl_coeff=0.2,
             vf_share_layers=False,
-            _tf_policy_handles_more_than_one_loss=True,
         )
         
         # Add callbacks
@@ -538,7 +541,7 @@ def train(args):
         
         # Other settings
         .debugging(disable_env_checking=True)
-        .multi_agent(enable_correction=True)  # Support for newer Ray versions
+        .multi_agent(enable_correction=True)
         .experimental(_enable_new_api_stack=True)
     )
     
@@ -616,7 +619,7 @@ def evaluate(args):
         
         # Environment runner config for evaluation
         .env_runners(
-            num_env_runners=0,
+            num_env_runners=0,  # No sample collection during evaluation
             remote_env_runner_envs=False,
             num_cpus_per_env_runner=1,
         )
@@ -628,13 +631,16 @@ def evaluate(args):
         )
         
         # Disable exploration for deterministic evaluation
-        .exploration(explore=False, exploration_config={"type": "StochasticSampling"})
+        .exploration(
+            explore=False, 
+            exploration_config={"type": "StochasticSampling"}
+        )
         
         # Evaluation-specific training params
         .training(
             vf_share_layers=False,
-            # Keep exploration disabled for evaluation
-            num_epochs=0,
+            num_epochs=0,  # No training epochs during evaluation
+            **{"lambda": 0.95},  # Must use dict unpacking since lambda is a Python keyword
         )
         
         # Enable newer API support
