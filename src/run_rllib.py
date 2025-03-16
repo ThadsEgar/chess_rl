@@ -187,6 +187,12 @@ def train(args):
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
+        
+        # Check available GPUs
+        gpu_count = torch.cuda.device_count()
+        print(f"Found {gpu_count} GPUs")
+    else:
+        gpu_count = 0
 
     ray.init(
         address=args.head_address if args.distributed else None,
@@ -196,13 +202,33 @@ def train(args):
         num_cpus=118,
     )
 
-    driver_gpus = 0.99999
-    worker_gpus = 3
+    # Dynamically set GPU configuration based on available hardware
     num_workers = 12
     cpus_per_worker = 4
-    driver_cpus = 8
     num_envs = 4
-    gpus_per_worker = round(worker_gpus / num_workers, 6)
+    
+    # Configure GPU usage
+    if gpu_count > 1 and args.device == "cuda" and not args.force_cpu:
+        # Multiple GPUs available - use them!
+        print(f"Configuring for {gpu_count} GPUs")
+        num_learners = min(4, gpu_count)  # Use up to 4 learners depending on available GPUs
+        driver_gpus = gpu_count * 0.8  # Keep some headroom on each GPU
+        worker_gpus = 0  # Prioritize learners over workers for now
+        gpus_per_learner = driver_gpus / num_learners if num_learners > 0 else 0
+        enable_ddp = True  # Enable distributed training with multiple GPUs
+    else:
+        # Single or no GPU
+        print("Configuring for single GPU or CPU")
+        num_learners = 1
+        driver_gpus = 0.8 if gpu_count > 0 and args.device == "cuda" and not args.force_cpu else 0
+        worker_gpus = 0
+        gpus_per_learner = driver_gpus
+        enable_ddp = False  # Disable distributed training with single GPU
+    
+    # Calculate worker GPU allocation if any GPU left for workers
+    gpus_per_worker = 0
+    if worker_gpus > 0 and num_workers > 0:
+        gpus_per_worker = round(worker_gpus / num_workers, 6)
     
     tune.register_env("chess_env", create_rllib_chess_env)
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
@@ -219,6 +245,7 @@ def train(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
+        model_config={},
     )
 
     config = (
@@ -226,7 +253,11 @@ def train(args):
         .environment("chess_env")
         .framework("torch")
         .resources(num_gpus=driver_gpus)
-        .learners(num_learners=4, num_gpus_per_learner=driver_gpus / 4)
+        # Configure learners based on available GPUs
+        .learners(
+            num_learners=num_learners,
+            num_gpus_per_learner=gpus_per_learner
+        )
         .env_runners(
             num_env_runners=num_workers,
             num_envs_per_env_runner=num_envs,
@@ -249,8 +280,12 @@ def train(args):
             vf_share_layers=False,
         )
         .callbacks(ChessMetricsCallback)
-        .rl_module(rl_module_spec=rl_module_spec)  # Removed action_distribution_config
+        .rl_module(rl_module_spec=rl_module_spec)
+        # Configure distributed training based on GPU availability
+        .experimental(_disable_learner_api_ddp=not enable_ddp, _enable_new_api_stack=True)
     )
+
+    print(f"Training with {num_learners} learners, DDP enabled: {enable_ddp}")
 
     analysis = tune.run(
         "PPO",
@@ -297,7 +332,6 @@ def evaluate(args):
         .rl_module(rl_module_spec=rl_module_spec)  # Removed action_distribution_config
         .exploration(explore=False)
         .training(lambda_=0.95, num_epochs=0)
-        .experimental(_enable_new_api_stack=True)
     )
 
     algo = PPO(config=config)
