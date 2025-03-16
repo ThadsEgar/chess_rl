@@ -7,7 +7,7 @@ This implementation uses RLlib's built-in distributed training capabilities with
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 # Third-party imports
 import gymnasium as gym
@@ -61,17 +61,20 @@ class ChessRewardConnector(ConnectorV2):
     def __call__(
         self,
         *,
-        rl_module: "RLModule",
-        data: dict,
-        episodes: list["EpisodeType"],
-        **kwargs
+        rl_module: RLModule,
+        batch: Dict[str, Any],
+        episodes: List[EpisodeType],
+        explore: Optional[bool] = None,
+        shared_data: Optional[dict] = None,
+        metrics: Optional[MetricsLogger] = None,
+        **kwargs,
     ) -> dict:
         """
         Adjust rewards in the data batch based on player perspective.
         - Intermediate rewards alternate (White: as-is, Black: flipped).
         - Terminal rewards: winner +1, loser -1.
         """
-        print(f"{data}")
+        print(f"{batch}")
         
         # Skip processing if required keys don't exist (e.g., during initialization)
         if "rewards" not in data or "dones" not in data or "infos" not in data:
