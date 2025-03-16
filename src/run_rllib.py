@@ -26,6 +26,7 @@ from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.tune.utils import merge_dicts
 from ray.rllib.core.columns import Columns
+from ray.rllib.connectors.learner.general_advantage_estimation import GeneralAdvantageEstimation
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 
@@ -148,13 +149,45 @@ class ChessMaskingRLModule(TorchRLModule):
         entropy = action_dist.entropy()
         
         # Return all required outputs with correct column names
-        return {
+        output = {
             Columns.ACTIONS: actions,
             Columns.ACTION_DIST_INPUTS: masked_logits,
             Columns.ACTION_LOGP: action_log_probs,
-            Columns.VF_PREDS: value,  # Use the correct column name
+            Columns.VF_PREDS: value,  # Value function predictions used for advantage calculation
             "entropy": entropy
         }
+        
+        # If we're calculating advantages, we want to make sure we provide 
+        # all the necessary information for the GAE connector
+        if "advantages" in batch:
+            output["advantages"] = batch["advantages"]
+        
+        return output
+
+
+def build_custom_learner_connector(input_observation_space, input_action_space, device=None):
+    """Build a custom learner connector pipeline that includes GAE.
+    
+    This function explicitly creates a connector pipeline that calculates advantages
+    using the GeneralAdvantageEstimation connector, which is essential for PPO.
+    """
+    from ray.rllib.connectors.connector_pipeline import ConnectorPipeline
+    from ray.rllib.connectors.common.tensor_to_numpy import TensorToNumpy
+    from ray.rllib.connectors.learner.add_one_ts_to_episodes_and_truncate import AddOneTsToEpisodesAndTruncate
+    from ray.rllib.connectors.common.add_observations_from_episodes_to_batch import AddObservationsFromEpisodesToBatch
+    from ray.rllib.connectors.learner.add_next_observations_from_episodes_to_train_batch import AddNextObservationsFromEpisodesToTrainBatch
+    
+    # Create a connector pipeline
+    pipeline = ConnectorPipeline()
+    
+    # Add the necessary connectors in the correct order
+    pipeline.append(AddOneTsToEpisodesAndTruncate())
+    pipeline.append(AddObservationsFromEpisodesToBatch())
+    pipeline.append(AddNextObservationsFromEpisodesToTrainBatch())
+    pipeline.append(GeneralAdvantageEstimation(gamma=0.99, lambda_=0.95))
+    pipeline.append(TensorToNumpy())
+    
+    return pipeline
 
 
 def create_rllib_chess_env(config):
@@ -284,10 +317,24 @@ def train(args):
             enable_rl_module_and_learner=True,
             enable_env_runner_and_connector_v2=True
         )
+        .learner(build_learner_connector=build_custom_learner_connector)
         .offline_data(
+            # Full configuration for the connector pipeline to compute advantages
             input_connector_pipeline_config={
+                # Add the necessary connector to elongate episodes by one timestep
+                "add_one_ts_to_episodes": True,
+                # Add observations from episodes to the batch
+                "add_obs_from_episodes": True,
+                # Add next observations from episodes to the train batch
+                "add_next_obs_from_episodes": True,
+                # Enable general advantage estimation
                 "extend_with_general_advantage_estimation": True,
+                # Lambda parameter for GAE
                 "gae_lambda": 0.95,
+            },
+            # This enables the GeneralAdvantageEstimation connector to work with the value function
+            learner_connector_pipeline_config={
+                "use_critic": True
             }
         )
     )
