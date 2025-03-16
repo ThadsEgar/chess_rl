@@ -209,22 +209,14 @@ def train(args):
     )
 
     # Resource configuration
-    num_workers = 12
-    cpus_per_worker = 4
-    num_envs = 4
+    num_env_runners = 1
+    driver_gpus = .5
+    num_cpus_per_env_runner = 4
+    num_gpus_per_env_runner = .5
+    num_envs_per_env_runner = 4
+    num_learners = 3
+    num_gpus_per_learner = 1
     
-    if gpu_count > 1 and args.device == "cuda" and not args.force_cpu:
-        print(f"Configuring for {gpu_count} GPUs")
-        num_learners = gpu_count  # One learner per GPU
-        driver_gpus = 0  # Driver shares GPUs with learners
-        gpus_per_learner = .5  # Full GPU per learner
-        gpus_per_worker = .49999 / num_workers  # Env runners share GPUs
-    else:
-        print("Configuring for single GPU or CPU")
-        num_learners = 1
-        driver_gpus = 1 if gpu_count > 0 else 0
-        gpus_per_learner = driver_gpus
-        gpus_per_worker = 0
 
     tune.register_env("chess_env", create_rllib_chess_env)
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
@@ -254,13 +246,13 @@ def train(args):
         )
         .learners(
             num_learners=num_learners,
-            num_gpus_per_learner=gpus_per_learner,
+            num_gpus_per_learner=num_gpus_per_learner,
         )
         .env_runners(
-            num_env_runners=num_workers,
-            num_envs_per_env_runner=num_envs,
-            num_cpus_per_env_runner=cpus_per_worker,
-            num_gpus_per_env_runner=gpus_per_worker,
+            num_env_runners=num_env_runners,
+            num_envs_per_env_runner=num_envs_per_env_runner,
+            num_cpus_per_env_runner=num_cpus_per_env_runner,
+            num_gpus_per_env_runner=num_gpus_per_env_runner,
             sample_timeout_s=None
         )
         .training(
