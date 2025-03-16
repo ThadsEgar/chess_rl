@@ -136,12 +136,14 @@ class ChessCombinedCallback(DefaultCallbacks):
             episode.custom_metrics[key] = value
 
 class ChessMaskingRLModule(TorchRLModule):
-    def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False):
+    def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False, catalog_class=None, **kwargs):
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
             model_config=model_config or {},
-            inference_only=inference_only
+            inference_only=inference_only,
+            catalog_class=catalog_class,
+            **kwargs
         )
         
         self.board_shape = observation_space["board"].shape
