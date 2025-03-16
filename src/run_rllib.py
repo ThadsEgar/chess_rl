@@ -143,9 +143,7 @@ class ChessMaskingRLModule(TorchRLModule):
         
         # Return required fields including Columns.ACTIONS
         return {
-            Columns.ACTION_DIST_INPUTS: masked_logits,  
             Columns.ACTIONS: actions,
-            "vf_preds": value
         }
 
 
@@ -261,6 +259,7 @@ def train(args):
             num_envs_per_env_runner=num_envs,
             num_cpus_per_env_runner=cpus_per_worker,
             num_gpus_per_env_runner=gpus_per_worker,
+            sample_timeout_s=None
         )
         .training(
             train_batch_size_per_learner=4096,
@@ -279,6 +278,11 @@ def train(args):
         )
         .callbacks(ChessMetricsCallback)
         .rl_module(rl_module_spec=rl_module_spec)
+        .api_stack(
+            enable_rl_module_and_learner=True,
+            enable_env_runner_and_connector_v2=True
+        )
+        
     )
 
     print(f"Training with {num_learners} learners, {num_workers} env runners")
