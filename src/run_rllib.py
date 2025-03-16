@@ -279,7 +279,7 @@ def train(args):
         
     )
 
-    print(f"Training with {num_learners} learners, {num_workers} env runners")
+    print(f"Training with {num_learners} learners, {num_env_runners} env runners")
 
     analysis = tune.run(
         "PPO",
