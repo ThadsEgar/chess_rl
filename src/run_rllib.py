@@ -511,9 +511,9 @@ def train(args):
         # Training parameters - including PPO-specific parameters
         .training(
             # Use the predefined batch sizes calculated based on hardware
-            train_batch_size=4096,
-            sgd_minibatch_size=256,
-            num_sgd_iter=10,
+            train_batch_size_per_learner=4096,
+            minibatch_size=256,
+            num_epochs=10,
             lr=5e-5,
             grad_clip=1.0,
             gamma=0.99,
@@ -632,7 +632,11 @@ def evaluate(args):
         .exploration(explore=False, exploration_config={"type": "StochasticSampling"})
         
         # Evaluation-specific training params
-        .training(vf_share_layers=False)
+        .training(
+            vf_share_layers=False,
+            # Keep exploration disabled for evaluation
+            num_epochs=0,
+        )
         
         # Enable newer API support
         .experimental(_enable_new_api_stack=True)
