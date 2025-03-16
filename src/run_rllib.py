@@ -14,7 +14,7 @@ import gymnasium as gym
 from pathlib import Path
 import ray
 from ray import tune
-from ray.rllib.algorithms.ppo import PPO
+from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
@@ -30,7 +30,6 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.policy import Policy
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.utils.typing import AgentID, EnvType, EpisodeType, PolicyID
-from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from ray.tune.utils import merge_dicts
 
 
@@ -483,7 +482,7 @@ def train(args):
     
     # Create config using the latest Ray API style (post-2.0)
     config = (
-        AlgorithmConfig()
+        PPOConfig()
         .environment("chess_env")
         .framework("torch")
         
@@ -606,7 +605,7 @@ def evaluate(args):
     
     # Create evaluation config with the latest Ray API
     config = (
-        AlgorithmConfig()
+        PPOConfig()
         .environment("chess_env")
         .framework("torch")
         

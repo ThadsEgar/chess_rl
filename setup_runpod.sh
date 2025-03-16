@@ -117,14 +117,24 @@ python -c "import ray; print('Ray installed successfully. Version:', ray.__versi
 # Create compatibility layer for different Ray versions
 mkdir -p $REPO_DIR/src/compat
 cat > $REPO_DIR/src/compat/__init__.py << 'EOF'
-# Compatibility layer for different Ray versions
+# Version check for Ray - we require the latest API
 import ray
+import sys
 
 # Get Ray version (first two components like 2.9)
 RAY_VERSION = '.'.join(ray.__version__.split('.')[:2])
 RAY_VERSION_FLOAT = float(RAY_VERSION)
 
 print(f"Detected Ray version: {ray.__version__}")
+
+# Check if Ray version is recent enough
+if RAY_VERSION_FLOAT < 2.6:
+    print(f"ERROR: This code requires Ray 2.6+ for the latest API features.")
+    print(f"Please upgrade Ray with: pip install -U 'ray[rllib]'")
+    sys.exit(1)
+else:
+    print(f"Ray version {ray.__version__} is compatible with our code")
+EOF
 
 # Install Gymnasium and related packages
 echo "Installing Gymnasium and dependencies..."
