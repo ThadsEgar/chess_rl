@@ -141,10 +141,14 @@ class ChessMaskingRLModule(TorchRLModule):
         action_dist = torch.distributions.Categorical(logits=masked_logits)
         actions = action_dist.sample()
         
-        # Return required fields including Columns.ACTIONS
+        # Calculate log probabilities of sampled actions
+        action_log_probs = action_dist.log_prob(actions)
+        
+        # Return required fields including Columns.ACTIONS and Columns.ACTION_LOGP
         return {
             Columns.ACTIONS: actions,
             Columns.ACTION_DIST_INPUTS: masked_logits,
+            Columns.ACTION_LOGP: action_log_probs,
             "vf_preds": value
         }
 
