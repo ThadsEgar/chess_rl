@@ -281,8 +281,6 @@ def train(args):
         )
         .callbacks(ChessMetricsCallback)
         .rl_module(rl_module_spec=rl_module_spec)
-        # Configure distributed training based on GPU availability
-        .experimental(_disable_learner_api_ddp=not enable_ddp, _enable_new_api_stack=True)
     )
 
     print(f"Training with {num_learners} learners, DDP enabled: {enable_ddp}")
