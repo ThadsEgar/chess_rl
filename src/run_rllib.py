@@ -75,6 +75,58 @@ def build_minimal_learner_connector(
     3. Adding next observations for TD learning
     4. Generalized Advantage Estimation (GAE)
     """
+    # We need to create custom connectors to avoid parameter conflicts
+    class SafeAddOneTsToEpisodesAndTruncate(AddOneTsToEpisodesAndTruncate):
+        def __call__(self, *, batch=None, episodes=None, **kwargs):
+            # Handle the case where data is passed as a keyword argument
+            data = kwargs.get("data", None)
+            if batch is None and "batch" in data:
+                batch = data["batch"]
+            if episodes is None and "episodes" in data:
+                episodes = data["episodes"]
+            
+            # Call the parent implementation with the correct parameters
+            return super().__call__(batch=batch, episodes=episodes)
+    
+    class SafeAddObservationsFromEpisodesToBatch(AddObservationsFromEpisodesToBatch):
+        def __call__(self, *, batch=None, episodes=None, **kwargs):
+            # Handle the case where data is passed as a keyword argument
+            data = kwargs.get("data", None)
+            if batch is None and "batch" in data:
+                batch = data["batch"]
+            if episodes is None and "episodes" in data:
+                episodes = data["episodes"]
+            
+            # Call the parent implementation with the correct parameters
+            return super().__call__(batch=batch, episodes=episodes)
+    
+    class SafeAddNextObservationsFromEpisodesToTrainBatch(AddNextObservationsFromEpisodesToTrainBatch):
+        def __call__(self, *, batch=None, episodes=None, **kwargs):
+            # Handle the case where data is passed as a keyword argument
+            data = kwargs.get("data", None)
+            if batch is None and "batch" in data:
+                batch = data["batch"]
+            if episodes is None and "episodes" in data:
+                episodes = data["episodes"]
+            
+            # Call the parent implementation with the correct parameters
+            return super().__call__(batch=batch, episodes=episodes)
+    
+    class SafeGeneralAdvantageEstimation(GeneralAdvantageEstimation):
+        def __init__(self, gamma=0.99, lambda_=1.0):
+            super().__init__(gamma=gamma, lambda_=lambda_)
+            
+        def __call__(self, *, batch=None, episodes=None, **kwargs):
+            # Handle the case where data is passed as a keyword argument
+            data = kwargs.get("data", None)
+            if batch is None and data and "batch" in data:
+                batch = data["batch"]
+            if episodes is None and data and "episodes" in data:
+                episodes = data["episodes"]
+            
+            # Call the parent implementation with the correct parameters
+            return super().__call__(batch=batch, episodes=episodes)
+    
     # Initialize empty pipeline
     pipeline = ConnectorPipelineV2(
         description="Minimal connector pipeline with GAE",
@@ -83,18 +135,18 @@ def build_minimal_learner_connector(
         connectors=[],  # Start with empty connectors list
     )
     
-    # Add necessary connectors for advantage calculation
+    # Add necessary connectors for advantage calculation, using our safe versions
     # 1. First, add one timestep to episodes for proper GAE calculation
-    pipeline.append(AddOneTsToEpisodesAndTruncate())
+    pipeline.append(SafeAddOneTsToEpisodesAndTruncate())
     
     # 2. Next, add observations to the batch
-    pipeline.append(AddObservationsFromEpisodesToBatch())
+    pipeline.append(SafeAddObservationsFromEpisodesToBatch())
     
     # 3. Add next observations for TD learning
-    pipeline.append(AddNextObservationsFromEpisodesToTrainBatch())
+    pipeline.append(SafeAddNextObservationsFromEpisodesToTrainBatch())
     
     # 4. Finally, compute GAE advantages with specified parameters
-    pipeline.append(GeneralAdvantageEstimation(
+    pipeline.append(SafeGeneralAdvantageEstimation(
         gamma=1.0,        # No discounting - equal weight for all moves
         lambda_=0.95,     # GAE lambda parameter
     ))
