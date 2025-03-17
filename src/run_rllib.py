@@ -182,6 +182,7 @@ class ChessMaskingRLModule(TorchRLModule):
         # Apply action masking
         masked_logits = action_logits + (action_mask - 1) * 1e9
         
+        # Make sure we include both value function and action distribution inputs
         return {
             Columns.VF_PREDS: value,
             Columns.ACTION_DIST_INPUTS: masked_logits
@@ -389,6 +390,7 @@ def train(args):
             clip_param=0.2,
             kl_coeff=0.2,
             vf_share_layers=False,
+            add_default_connectors_to_learner_pipeline=True,
         )
         # Callback configuration
         .callbacks(ChessCombinedCallback)
