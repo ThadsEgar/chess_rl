@@ -66,80 +66,62 @@ class ChessRewardShapingConnector(ConnectorV2):
     """Shapes rewards based on player perspective for chess environment."""
     
     def __call__(
-        self,
-        *,
-        rl_module: RLModule,
-        batch: Dict[str, Any] = None,
-        episodes: List[EpisodeType] = None,
-        explore: Optional[bool] = None,
-        shared_data: Optional[dict] = None,
-        metrics: Optional[MetricsLogger] = None,
-        **kwargs,
-    ) -> dict:
-        """
-        Shape rewards according to player perspective.
-        - White's rewards stay as-is
-        - Black's rewards are flipped (multiplied by -1)
-        """
-        # Get batch from kwargs if not provided directly
-        # This handles the case where 'batch' might be passed as 'data' by the pipeline
-        data = kwargs.get('data', None)
-        if batch is None and data is not None:
-            batch = data
-        
-        # Handle empty batch 
-        if not batch or "rewards" not in batch:
-            return batch
-        
-        rewards = batch["rewards"]
-        if len(rewards) == 0:
-            return batch
+            self,
+            *,
+            rl_module: RLModule,
+            data: Dict[str, Any],
+            episodes: List[Any],  # EpisodeType is a placeholder; adjust based on your RLlib version
+            explore: Optional[bool] = None,
+            shared_data: Optional[dict] = None,
+            **kwargs
+        ) -> Dict[str, Any]:
+            """
+            Shape rewards according to player perspective.
+            - White's rewards stay as-is.
+            - Black's rewards are flipped (multiplied by -1).
+            """
+            # Check if data is valid
+            if not data or "rewards" not in data:
+                return data
             
-        # Create a mask to identify which steps belong to black (odd indices)
-        # Since we're not directly tracking player turns in the batch,
-        # we'll use a heuristic based on step indices within episodes
-        shaped_rewards = rewards.copy()
-        
-        # Process each episode
-        for episode in episodes:
-            # Get the episode's rewards
-            episode_rewards = episode.rewards
-            
-            # Shape rewards based on player turns (even indices for white, odd for black)
-            for i in range(len(episode_rewards)):
-                player = i % 2  # 0 for White, 1 for Black
+            rewards = data["rewards"]
+            if len(rewards) == 0:
+                return data
                 
-                # For black's rewards, flip the sign for non-terminal states
-                if player == 1 and i < len(episode_rewards) - 1:
-                    episode_rewards[i] = -episode_rewards[i]
+            shaped_rewards = rewards.copy()
             
-            # Shape terminal rewards if the episode is done
-            if episode.length > 0 and (episode.terminated[-1] or episode.truncated[-1]):
-                last_idx = episode.length - 1
-                info = episode.infos[last_idx] if episode.infos else {}
+            # Process each episode to shape rewards
+            for episode in episodes:
+                episode_rewards = episode.rewards
+                for i in range(len(episode_rewards)):
+                    player = i % 2  # 0 for White, 1 for Black
+                    # Flip Black's rewards for non-terminal states
+                    if player == 1 and i < len(episode_rewards) - 1:
+                        episode_rewards[i] = -episode_rewards[i]
                 
-                if "outcome" in info:
-                    outcome = info["outcome"]
-                    last_player = last_idx % 2  # 0 for White, 1 for Black
-                    
-                    if outcome == "white_win":
-                        episode_rewards[last_idx] = 1.0 if last_player == 0 else -1.0
-                        if last_idx > 0:
-                            # Previous player lost
-                            episode_rewards[last_idx - 1] = -1.0 if last_player == 0 else 1.0
-                    elif outcome == "black_win":
-                        episode_rewards[last_idx] = 1.0 if last_player == 1 else -1.0
-                        if last_idx > 0:
-                            # Previous player lost
-                            episode_rewards[last_idx - 1] = -1.0 if last_player == 1 else 1.0
-                    elif outcome == "draw":
-                        episode_rewards[last_idx] = 0.0
-                        if last_idx > 0:
-                            episode_rewards[last_idx - 1] = 0.0
-        
-        # Update the batch with shaped rewards from episodes
-        batch["rewards"] = shaped_rewards
-        return batch
+                # Handle terminal rewards
+                if episode.length > 0 and (episode.terminated[-1] or episode.truncated[-1]):
+                    last_idx = episode.length - 1
+                    info = episode.infos[last_idx] if episode.infos else {}
+                    if "outcome" in info:
+                        outcome = info["outcome"]
+                        last_player = last_idx % 2  # 0 for White, 1 for Black
+                        if outcome == "white_win":
+                            episode_rewards[last_idx] = 1.0 if last_player == 0 else -1.0
+                            if last_idx > 0:
+                                episode_rewards[last_idx - 1] = -1.0 if last_player == 0 else 1.0
+                        elif outcome == "black_win":
+                            episode_rewards[last_idx] = 1.0 if last_player == 1 else -1.0
+                            if last_idx > 0:
+                                episode_rewards[last_idx - 1] = -1.0 if last_player == 1 else 1.0
+                        elif outcome == "draw":
+                            episode_rewards[last_idx] = 0.0
+                            if last_idx > 0:
+                                episode_rewards[last_idx - 1] = 0.0
+            
+            # Update the data dictionary with shaped rewards
+            data["rewards"] = shaped_rewards
+            return data
 
 # Define the DeepMind-style learner connector pipeline with GAE
 def build_deepmind_learner_connector(
