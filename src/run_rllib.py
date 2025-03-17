@@ -32,13 +32,11 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.policy.sample_batch import Postprocessing  # For advantage calculation
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 import gc
 import os
-from ray.rllib.policy.sample_batch import SampleBatch
 # Framework-specific imports
 torch, nn = try_import_torch()
 
