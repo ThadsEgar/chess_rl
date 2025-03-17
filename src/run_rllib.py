@@ -42,7 +42,7 @@ torch, nn = try_import_torch()
 
 # Metrics-only callback
 class DebugCallback(DefaultCallbacks):
-    def on_train_batch_fetched(self, *, algorithm, batch, **kwargs):
+    def on_train_result(self, *, algorithm, batch, **kwargs):
         print(f"Batch keys: {list(batch.keys())}")
         required_keys = [SampleBatch.REWARDS, SampleBatch.VF_PREDS, SampleBatch.DONES, SampleBatch.OBS]
         missing = [key for key in required_keys if key not in batch]
