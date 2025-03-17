@@ -360,10 +360,10 @@ def train(args):
             num_envs_per_env_runner=num_envs_per_env_runner,
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
+            add_default_connectors_to_env_to_module_pipeline=True,
+            add_default_connectors_to_module_to_env_pipeline=True,
             remote_env_batch_wait_ms=0,
-            sample_collector_class=None,
-            sample_async=False,
-            explore=True,
+            sample_timeout_s=None,
         )
         # Training configuration
         .training(
