@@ -385,7 +385,7 @@ def train(args):
         .callbacks(ChessCombinedCallback)
         # Custom RL module configuration
         .rl_module(
-            _enable_rl_module_api=True,
+            enable_rl_module_and_learner=True,
             model_config_dict={},
             rl_module_spec=ChessMaskingRLModule,
         )
