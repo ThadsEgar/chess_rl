@@ -21,14 +21,12 @@ from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.core.models.base import ENCODER_OUT
 from ray.rllib.core.models.torch.base import TorchModel
-from ray.rllib.core.rl_module.marl.multi_agent_rl_module import MultiAgentRLModule
 from ray.rllib.env.base_env import BaseEnv
 from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.typing import PolicyID, NestedDict
+from ray.rllib.utils.typing import PolicyID
 from ray.rllib.utils.annotations import override
 from ray.rllib.core.rl_module.default_model_config import DefaultModelConfig
-from ray.rllib.utils.nested_dict import NestedDict
 from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
@@ -108,7 +106,7 @@ class ChessMaskingRLModule(TorchRLModule):
         self.value_head = nn.Linear(832, 1)
         
     @override(TorchRLModule)
-    def _forward_inference(self, batch: NestedDict) -> Dict[str, Any]:
+    def _forward_inference(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Forward pass for inference (evaluation).
         
         Args:
@@ -120,7 +118,7 @@ class ChessMaskingRLModule(TorchRLModule):
         return self._masked_forward(batch, explore=False)
     
     @override(TorchRLModule)
-    def _forward_exploration(self, batch: NestedDict) -> Dict[str, Any]:
+    def _forward_exploration(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Forward pass for exploration (training data collection).
         
         Args:
@@ -132,7 +130,7 @@ class ChessMaskingRLModule(TorchRLModule):
         return self._masked_forward(batch, explore=True)
         
     @override(TorchRLModule)
-    def _forward_train(self, batch: NestedDict) -> Dict[str, Any]:
+    def _forward_train(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Forward pass for training.
         
         Args:
@@ -188,7 +186,7 @@ class ChessMaskingRLModule(TorchRLModule):
             Columns.ACTION_DIST_INPUTS: masked_logits
         }
     
-    def _masked_forward(self, batch: NestedDict, explore: bool) -> Dict[str, Any]:
+    def _masked_forward(self, batch: Dict[str, Any], explore: bool) -> Dict[str, Any]:
         """Common forward pass implementation for both inference and exploration.
         
         Args:
