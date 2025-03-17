@@ -16,6 +16,11 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.connectors.connector_pipeline_v2 import ConnectorPipelineV2
+from ray.rllib.connectors.learner.add_one_ts_to_episodes_and_truncate import AddOneTsToEpisodesAndTruncate
+from ray.rllib.connectors.common.add_observations_from_episodes_to_batch import AddObservationsFromEpisodesToBatch
+from ray.rllib.connectors.learner.add_next_observations_from_episodes_to_train_batch import AddNextObservationsFromEpisodesToTrainBatch
+from ray.rllib.connectors.learner.general_advantage_estimation import GeneralAdvantageEstimation
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.env.base_env import BaseEnv
@@ -54,6 +59,47 @@ from ray.tune.callback import _CallbackMeta
 
 # Framework-specific imports
 torch, nn = try_import_torch()
+
+# Define a minimal learner connector pipeline for GAE calculation
+def build_minimal_learner_connector(
+    input_observation_space=None,
+    input_action_space=None,
+    device=None,
+):
+    """
+    Build a minimal learner connector pipeline with just the essential components for advantage calculation.
+    
+    This includes:
+    1. Adding one timestep to episodes for proper GAE
+    2. Adding observations from episodes to the batch
+    3. Adding next observations for TD learning
+    4. Generalized Advantage Estimation (GAE)
+    """
+    # Initialize empty pipeline
+    pipeline = ConnectorPipelineV2(
+        description="Minimal connector pipeline with GAE",
+        input_observation_space=input_observation_space,
+        input_action_space=input_action_space,
+        connectors=[],  # Start with empty connectors list
+    )
+    
+    # Add necessary connectors for advantage calculation
+    # 1. First, add one timestep to episodes for proper GAE calculation
+    pipeline.append(AddOneTsToEpisodesAndTruncate())
+    
+    # 2. Next, add observations to the batch
+    pipeline.append(AddObservationsFromEpisodesToBatch())
+    
+    # 3. Add next observations for TD learning
+    pipeline.append(AddNextObservationsFromEpisodesToTrainBatch())
+    
+    # 4. Finally, compute GAE advantages with specified parameters
+    pipeline.append(GeneralAdvantageEstimation(
+        gamma=1.0,        # No discounting - equal weight for all moves
+        lambda_=0.95,     # GAE lambda parameter
+    ))
+    
+    return pipeline
 
 # Metrics-only callback
 class ChessCombinedCallback(DefaultCallbacks):
@@ -297,7 +343,7 @@ def train(args):
             clip_param=0.2,       # PPO clipping parameter
             kl_coeff=0.2,         # KL divergence coefficient
             vf_share_layers=False,
-            # Using default connectors - no custom connector specified
+            learner_connector=build_minimal_learner_connector,  # Use our minimal connector for GAE
         )
         .callbacks(ChessCombinedCallback)
         .rl_module(rl_module_spec=rl_module_spec)
