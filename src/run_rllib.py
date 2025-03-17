@@ -31,7 +31,7 @@ from ray.rllib.core.rl_module.default_model_config import DefaultModelConfig
 from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
-from ray.rllib.policy.sample_batch import SampleBatch, Postprocessing
+from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.algorithms.ppo.ppo_catalog import PPOCatalog
 
 # Local imports
