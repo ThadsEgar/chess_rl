@@ -319,22 +319,6 @@ def create_rllib_chess_env(config):
 
     return DictObsWrapper(env)
 
-def create_postprocessing_connector(env):
-    """Creates a connector pipeline that includes postprocessing for advantage calculation."""
-    # Use PPO's built-in methods to create the connector pipeline with GAE
-    catalog = PPOCatalog(
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        model_config_dict={}
-    )
-    return catalog.build_env_to_module_connectors(
-        env, 
-        gamma=1.0,
-        lambda_=0.95,
-        use_gae=True,
-        use_critic=True
-    )
-
 def train(args):
     if args.device == "cuda" and not args.force_cpu:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -406,9 +390,8 @@ def train(args):
             num_envs_per_env_runner=num_envs_per_env_runner,
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
-            add_default_connectors_to_env_to_module_pipeline=False,  # Don't add default connectors
+            add_default_connectors_to_env_to_module_pipeline=True,  # Don't add default connectors
             add_default_connectors_to_module_to_env_pipeline=True,
-            env_to_module_connector=create_postprocessing_connector,  # Use our custom connector function
             sample_timeout_s=None,
         )
         # Training configuration
