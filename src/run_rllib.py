@@ -422,7 +422,7 @@ def train(args):
 
     # Using the newer Tuner API instead of the older tune.run
     tuner = tune.Tuner(
-        "PPO",
+        PPO,
         run_config=tune.RunConfig(
             stop={"training_iteration": args.max_iterations},
             checkpoint_config=tune.CheckpointConfig(
