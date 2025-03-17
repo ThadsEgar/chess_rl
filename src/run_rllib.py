@@ -278,8 +278,8 @@ def train(args):
         )
         .training(
             train_batch_size_per_learner=4096,
-            train_batch_size=256,
-            num_epochs=10,
+            minibatch_size=256,
+            num_sgd_iter=10,
             lr=5e-5,
             grad_clip=1.0,
             gamma=1.0,            # No discounting - equal weight for all moves
