@@ -16,11 +16,6 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
-from ray.rllib.connectors.connector_pipeline_v2 import ConnectorPipelineV2
-from ray.rllib.connectors.learner.add_one_ts_to_episodes_and_truncate import AddOneTsToEpisodesAndTruncate
-from ray.rllib.connectors.common.add_observations_from_episodes_to_batch import AddObservationsFromEpisodesToBatch
-from ray.rllib.connectors.learner.add_next_observations_from_episodes_to_train_batch import AddNextObservationsFromEpisodesToTrainBatch
-from ray.rllib.connectors.learner.general_advantage_estimation import GeneralAdvantageEstimation
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.env.base_env import BaseEnv
@@ -59,99 +54,6 @@ from ray.tune.callback import _CallbackMeta
 
 # Framework-specific imports
 torch, nn = try_import_torch()
-
-# Define a minimal learner connector pipeline for GAE calculation
-def build_minimal_learner_connector(
-    input_observation_space=None,
-    input_action_space=None,
-    device=None,
-):
-    """
-    Build a minimal learner connector pipeline with just the essential components for advantage calculation.
-    
-    This includes:
-    1. Adding one timestep to episodes for proper GAE
-    2. Adding observations from episodes to the batch
-    3. Adding next observations for TD learning
-    4. Generalized Advantage Estimation (GAE)
-    """
-    # We need to create custom connectors to avoid parameter conflicts
-    class SafeAddOneTsToEpisodesAndTruncate(AddOneTsToEpisodesAndTruncate):
-        def __call__(self, *, batch=None, episodes=None, **kwargs):
-            # Handle the case where data is passed as a keyword argument
-            data = kwargs.get("data", None)
-            if batch is None and "batch" in data:
-                batch = data["batch"]
-            if episodes is None and "episodes" in data:
-                episodes = data["episodes"]
-            
-            # Call the parent implementation with the correct parameters
-            return super().__call__(batch=batch, episodes=episodes)
-    
-    class SafeAddObservationsFromEpisodesToBatch(AddObservationsFromEpisodesToBatch):
-        def __call__(self, *, batch=None, episodes=None, **kwargs):
-            # Handle the case where data is passed as a keyword argument
-            data = kwargs.get("data", None)
-            if batch is None and "batch" in data:
-                batch = data["batch"]
-            if episodes is None and "episodes" in data:
-                episodes = data["episodes"]
-            
-            # Call the parent implementation with the correct parameters
-            return super().__call__(batch=batch, episodes=episodes)
-    
-    class SafeAddNextObservationsFromEpisodesToTrainBatch(AddNextObservationsFromEpisodesToTrainBatch):
-        def __call__(self, *, batch=None, episodes=None, **kwargs):
-            # Handle the case where data is passed as a keyword argument
-            data = kwargs.get("data", None)
-            if batch is None and "batch" in data:
-                batch = data["batch"]
-            if episodes is None and "episodes" in data:
-                episodes = data["episodes"]
-            
-            # Call the parent implementation with the correct parameters
-            return super().__call__(batch=batch, episodes=episodes)
-    
-    class SafeGeneralAdvantageEstimation(GeneralAdvantageEstimation):
-        def __init__(self, gamma=0.99, lambda_=1.0):
-            super().__init__(gamma=gamma, lambda_=lambda_)
-            
-        def __call__(self, *, batch=None, episodes=None, **kwargs):
-            # Handle the case where data is passed as a keyword argument
-            data = kwargs.get("data", None)
-            if batch is None and data and "batch" in data:
-                batch = data["batch"]
-            if episodes is None and data and "episodes" in data:
-                episodes = data["episodes"]
-            
-            # Call the parent implementation with the correct parameters
-            return super().__call__(batch=batch, episodes=episodes)
-    
-    # Initialize empty pipeline
-    pipeline = ConnectorPipelineV2(
-        description="Minimal connector pipeline with GAE",
-        input_observation_space=input_observation_space,
-        input_action_space=input_action_space,
-        connectors=[],  # Start with empty connectors list
-    )
-    
-    # Add necessary connectors for advantage calculation, using our safe versions
-    # 1. First, add one timestep to episodes for proper GAE calculation
-    pipeline.append(SafeAddOneTsToEpisodesAndTruncate())
-    
-    # 2. Next, add observations to the batch
-    pipeline.append(SafeAddObservationsFromEpisodesToBatch())
-    
-    # 3. Add next observations for TD learning
-    pipeline.append(SafeAddNextObservationsFromEpisodesToTrainBatch())
-    
-    # 4. Finally, compute GAE advantages with specified parameters
-    pipeline.append(SafeGeneralAdvantageEstimation(
-        gamma=1.0,        # No discounting - equal weight for all moves
-        lambda_=0.95,     # GAE lambda parameter
-    ))
-    
-    return pipeline
 
 # Metrics-only callback
 class ChessCombinedCallback(DefaultCallbacks):
@@ -395,13 +297,13 @@ def train(args):
             clip_param=0.2,       # PPO clipping parameter
             kl_coeff=0.2,         # KL divergence coefficient
             vf_share_layers=False,
-            learner_connector=build_minimal_learner_connector,  # Use our minimal connector for GAE
+            # No learner_connector needed - using older system for advantage calculation
         )
         .callbacks(ChessCombinedCallback)
         .rl_module(rl_module_spec=rl_module_spec)
         .api_stack(
             enable_rl_module_and_learner=True,
-            enable_env_runner_and_connector_v2=True
+            enable_env_runner_and_connector_v2=False  # Disable the V2 connector system
         )
     )
 
@@ -451,7 +353,10 @@ def evaluate(args):
         .rl_module(rl_module_spec=rl_module_spec)
         .exploration(explore=False)
         .training(lambda_=0.95, num_epochs=0)
-        .api_stack(enable_rl_module_and_learner=True, enable_env_runner_and_connector_v2=True)
+        .api_stack(
+            enable_rl_module_and_learner=True,
+            enable_env_runner_and_connector_v2=False  # Disable the V2 connector system
+        )
     )
 
     algo = PPO(config=config)
