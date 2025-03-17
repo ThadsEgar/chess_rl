@@ -36,11 +36,27 @@ from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 import gc
 import os
-
+from ray.rllib.policy.sample_batch import SampleBatch
 # Framework-specific imports
 torch, nn = try_import_torch()
 
 # Metrics-only callback
+class DebugCallback(DefaultCallbacks):
+    def on_train_batch_fetched(self, *, algorithm, batch, **kwargs):
+        print(f"Batch keys: {list(batch.keys())}")
+        required_keys = [SampleBatch.REWARDS, SampleBatch.VF_PREDS, SampleBatch.DONES, SampleBatch.OBS]
+        missing = [key for key in required_keys if key not in batch]
+        if missing:
+            print(f"Missing keys in batch: {missing}")
+        if SampleBatch.ADVANTAGES not in batch:
+            print("Warning: ADVANTAGES missing from batch")
+        if SampleBatch.CUR_OBS not in batch:
+            print("Warning: CUR_OBS missing from batch")
+        if SampleBatch.NEXT_OBS not in batch:
+            print("Warning: NEXT_OBS missing from batch")
+        if SampleBatch.ACTIONS not in batch:
+            print("Warning: ACTIONS missing from batch")
+                  
 class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
         self,
@@ -394,7 +410,7 @@ def train(args):
             add_default_connectors_to_learner_pipeline=True,
         )
         # Callback configuration
-        .callbacks(ChessCombinedCallback)
+        .callbacks(DebugCallback)
         # Custom RL module configuration
         .rl_module(
             model_config_dict={},
