@@ -81,10 +81,11 @@ class ChessRewardShapingConnector(ConnectorV2):
         - White's rewards stay as-is
         - Black's rewards are flipped (multiplied by -1)
         """
-        # Get batch from either explicit parameter or kwargs
+        # Get batch from kwargs if not provided directly
         # This handles the case where 'batch' might be passed as 'data' by the pipeline
-        if batch is None and 'data' in kwargs:
-            batch = kwargs.get('data')
+        data = kwargs.get('data', None)
+        if batch is None and data is not None:
+            batch = data
         
         # Handle empty batch 
         if not batch or "rewards" not in batch:
