@@ -47,54 +47,6 @@ torch, nn = try_import_torch()
 MASK_VALUE = -1e9  # Large negative value to mask out invalid actions
 
 # Metrics-only callback
-class DebugCallback(DefaultCallbacks):
-    def on_train_result(self, *, algorithm, batch, **kwargs):
-        # Print batch keys and PPO configuration for debugging
-        print(f"\n=== TRAINING DEBUG INFORMATION ===")
-        print(f"Batch keys: {list(batch.keys())}")
-        print(f"Batch size: {len(batch) if batch else 'unknown'}")
-        
-        # Check for required keys
-        required_keys = [SampleBatch.REWARDS, SampleBatch.VF_PREDS, SampleBatch.DONES, SampleBatch.OBS]
-        missing = [key for key in required_keys if key not in batch]
-        if missing:
-            print(f"⚠️ Missing required keys in batch: {missing}")
-        
-        # Check for advantages in the batch
-        if SampleBatch.ADVANTAGES in batch:
-            advantages = batch[SampleBatch.ADVANTAGES]
-            print(f"✓ ADVANTAGES found in batch - shape: {advantages.shape}")
-            if torch.is_tensor(advantages):
-                adv_stats = {
-                    "mean": advantages.mean().item(),
-                    "std": advantages.std().item() if advantages.numel() > 1 else 0,
-                    "min": advantages.min().item(),
-                    "max": advantages.max().item()
-                }
-            else:
-                import numpy as np
-                adv_stats = {
-                    "mean": np.mean(advantages),
-                    "std": np.std(advantages) if len(advantages) > 1 else 0,
-                    "min": np.min(advantages),
-                    "max": np.max(advantages)
-                }
-            print(f"Advantage stats: {adv_stats}")
-        else:
-            print(f"❌ ADVANTAGES missing from batch")
-            print(f"GAE config - gamma: {algorithm.config.get('gamma')}, lambda: {algorithm.config.get('lambda')}")
-            
-        # Check for other important keys
-        for key in [SampleBatch.CUR_OBS, SampleBatch.NEXT_OBS, SampleBatch.ACTIONS]:
-            if key not in batch:
-                print(f"⚠️ {key} missing from batch")
-                
-        # Print PPO config
-        print(f"Using PPO module: {algorithm.config.get('_enable_rl_module_api')}")
-        print(f"Batch mode: {algorithm.config.get('batch_mode')}")
-        print(f"GAE enabled: {algorithm.config.get('use_gae')}")
-        print(f"Lambda value: {algorithm.config.get('lambda')}")
-        print(f"=== END DEBUG INFORMATION ===\n")
 
 class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
@@ -436,7 +388,7 @@ def train(args):
             vf_share_layers=False,
         )
         # Callback configuration
-        .callbacks(DebugCallback)
+        .callbacks(ChessCombinedCallback)
         # Custom RL module configuration
         .rl_module(
             model_config_dict={},
