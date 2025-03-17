@@ -18,6 +18,7 @@ from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.core.rl_module.rl_module_spec import SingleAgentRLModuleSpec
 from ray.rllib.env.base_env import BaseEnv
 from ray.rllib.models import ModelCatalog
 from ray.rllib.policy import Policy
@@ -256,7 +257,15 @@ def train(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    # In Ray 2.31.0, we use the module_class directly in the config.rl_module() call
+    # Create RLModuleSpec with our custom module class
+    rl_module_spec = SingleAgentRLModuleSpec(
+        module_class=ChessMaskingRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config_dict={}
+    )
+
+    # In Ray 2.31.0, we use RLModuleSpec in the config.rl_module() call
     config = (
         PPOConfig()
         .environment("chess_env")
@@ -278,8 +287,8 @@ def train(args):
         )
         .training(
             train_batch_size_per_learner=4096,
-            train_batch_size=256,
-            num_sgd_iter=10,
+            minibatch_size=256,
+            num_sgd_iter=10,  # Changed from num_epochs to num_sgd_iter
             lr=5e-5,
             grad_clip=1.0,
             gamma=1.0,            # No discounting - equal weight for all moves
@@ -294,10 +303,7 @@ def train(args):
         .callbacks(ChessCombinedCallback)
         # Ray 2.31.0 style RL module configuration
         .rl_module(
-            module_class=ChessMaskingRLModule,
-            observation_space=observation_space,
-            action_space=action_space,
-            model_config={},
+            rl_module_spec=rl_module_spec
         )
         # Use the new API stack fully
         .api_stack(
@@ -339,6 +345,14 @@ def evaluate(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
+    # Create RLModuleSpec with our custom module class
+    rl_module_spec = SingleAgentRLModuleSpec(
+        module_class=ChessMaskingRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config_dict={}
+    )
+
     # Ray 2.31.0 style configuration
     config = (
         PPOConfig()
@@ -347,13 +361,10 @@ def evaluate(args):
         .resources(num_gpus=1 if args.device == "cuda" else 0)
         .env_runners(num_env_runners=0, num_cpus_per_env_runner=1)
         .rl_module(
-            module_class=ChessMaskingRLModule,
-            observation_space=observation_space,
-            action_space=action_space,
-            model_config={},
+            rl_module_spec=rl_module_spec
         )
         .exploration(explore=False)
-        .training(lambda_=0.95, num_epochs=0)
+        .training(lambda_=0.95, num_sgd_iter=0)
         .api_stack(
             enable_rl_module_and_learner=True,
             enable_env_runner_and_connector_v2=True
