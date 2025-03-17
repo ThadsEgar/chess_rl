@@ -7,7 +7,7 @@ This implementation uses RLlib's built-in distributed training capabilities with
 import argparse
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List, Tuple
 
 # Third-party imports
 import gymnasium as gym
@@ -16,40 +16,27 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.core.columns import Columns
 from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.core.models.base import ENCODER_OUT
+from ray.rllib.core.models.torch.base import TorchModel
+from ray.rllib.core.rl_module.marl.multi_agent_rl_module import MultiAgentRLModule
 from ray.rllib.env.base_env import BaseEnv
-from ray.rllib.models import ModelCatalog
 from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.typing import PolicyID
-from ray.tune.utils import merge_dicts
-from ray.rllib.core.columns import Columns
+from ray.rllib.utils.typing import PolicyID, NestedDict
+from ray.rllib.utils.annotations import override
+from ray.rllib.core.rl_module.default_model_config import DefaultModelConfig
+from ray.rllib.utils.nested_dict import NestedDict
+from ray.rllib.evaluation.episode_v2 import EpisodeV2
+from ray.rllib.env.env_context import EnvContext
+from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
 import gc
 import os
-import platform
-import tracemalloc
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
-
-import gymnasium as gym
-
-from ray.rllib.env.base_env import BaseEnv
-from ray.rllib.env.env_context import EnvContext
-from ray.rllib.evaluation.episode_v2 import EpisodeV2
-from ray.rllib.policy import Policy
-from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.utils.annotations import (
-    OldAPIStack,
-    override,
-    OverrideToImplementCustomLogic,
-    PublicAPI,
-)
-from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
-from ray.rllib.utils.typing import AgentID, EnvType, EpisodeType, PolicyID
-from ray.tune.callback import _CallbackMeta
 
 # Framework-specific imports
 torch, nn = try_import_torch()
@@ -59,16 +46,12 @@ class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
         self,
         *,
-        episode: Union[EpisodeType, EpisodeV2],
-        env_runner: Optional["EnvRunner"] = None,
+        episode: Union[EpisodeV2, "EpisodeType"],
+        env_runner: Optional[Any] = None,
         metrics_logger: Optional[MetricsLogger] = None,
         env: Optional[gym.Env] = None,
         env_index: int,
         rl_module: Optional[RLModule] = None,
-        # TODO (sven): Deprecate these args.
-        worker: Optional["EnvRunner"] = None,
-        base_env: Optional[BaseEnv] = None,
-        policies: Optional[Dict[PolicyID, Policy]] = None,
         **kwargs,
     ) -> None:
         # Extract episode info from the last step
@@ -95,19 +78,18 @@ class ChessCombinedCallback(DefaultCallbacks):
             print(f"Game outcome metrics (no metrics_logger available): white_win={white_win}, black_win={black_win}, draw={draw}, checkmate={checkmate}, stalemate={stalemate}")
 
 class ChessMaskingRLModule(TorchRLModule):
-    def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False, catalog_class=None, **kwargs):
-        super().__init__(
-            observation_space=observation_space,
-            action_space=action_space,
-            model_config=model_config or {},
-            inference_only=inference_only,
-            catalog_class=catalog_class,
-            **kwargs
-        )
-        
-        self.board_shape = observation_space["board"].shape
+    """RLModule that implements action masking for chess environment.
+    
+    This RLModule handles action masking by using the action_mask provided
+    by the environment to mask out invalid actions.
+    """
+    
+    @override(TorchRLModule)
+    def setup(self):
+        """Initialize neural network modules."""
+        self.board_shape = self.observation_space["board"].shape
         self.board_channels = self.board_shape[0]
-        self.action_space_n = action_space.n
+        self.action_space_n = self.action_space.n
 
         self.features_extractor = nn.Sequential(
             nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
@@ -125,30 +107,133 @@ class ChessMaskingRLModule(TorchRLModule):
         self.policy_head = nn.Linear(832, self.action_space_n)
         self.value_head = nn.Linear(832, 1)
         
-    def _forward(self, batch, **kwargs):
-        obs = batch.get("obs", batch)
+    @override(TorchRLModule)
+    def _forward_inference(self, batch: NestedDict) -> Dict[str, Any]:
+        """Forward pass for inference (evaluation).
+        
+        Args:
+            batch: Input batch of observations with action masks.
+            
+        Returns:
+            Dict with action distribution inputs and value predictions.
+        """
+        return self._masked_forward(batch, explore=False)
+    
+    @override(TorchRLModule)
+    def _forward_exploration(self, batch: NestedDict) -> Dict[str, Any]:
+        """Forward pass for exploration (training data collection).
+        
+        Args:
+            batch: Input batch of observations with action masks.
+            
+        Returns:
+            Dict with action distribution inputs and value predictions.
+        """
+        return self._masked_forward(batch, explore=True)
+        
+    @override(TorchRLModule)
+    def _forward_train(self, batch: NestedDict) -> Dict[str, Any]:
+        """Forward pass for training.
+        
+        Args:
+            batch: Input batch containing observations, action masks, actions, etc.
+            
+        Returns:
+            Dict with value function predictions for training.
+        """
+        # Extract observations from batch
+        obs = batch.get(Columns.OBS)
+        
+        # Handle observations during training (may have been processed by connectors)
+        if isinstance(obs, dict) and "board" in obs:
+            board = obs["board"]
+            # During training, action_mask might be in a different format due to connectors
+            if "action_mask" in obs:
+                action_mask = obs["action_mask"]
+            else:
+                # If action mask not directly available, we still need value predictions
+                action_mask = None
+        else:
+            # If observations have been flattened, we still need to compute values
+            board = obs
+            action_mask = None
+            
+        if len(board.shape) == 3:
+            board = board.unsqueeze(0)
+        
+        # Extract features from board state
+        features = self.features_extractor(board)
+        
+        # Compute value predictions (required for PPO training)
+        value = self.value_head(features).view(-1, 1)
+        
+        # If we don't have action masks, we just need to return value predictions
+        if action_mask is None:
+            return {
+                Columns.VF_PREDS: value
+            }
+            
+        # Otherwise, we compute policy outputs with masking
+        if len(action_mask.shape) == 1:
+            action_mask = action_mask.unsqueeze(0)
+            
+        action_mask = action_mask.to(features.device)
+        action_logits = self.policy_head(features)
+        
+        # Apply action masking
+        masked_logits = action_logits + (action_mask - 1) * 1e9
+        
+        return {
+            Columns.VF_PREDS: value,
+            Columns.ACTION_DIST_INPUTS: masked_logits
+        }
+    
+    def _masked_forward(self, batch: NestedDict, explore: bool) -> Dict[str, Any]:
+        """Common forward pass implementation for both inference and exploration.
+        
+        Args:
+            batch: Input batch containing observations and action masks.
+            explore: Whether to use exploration or deterministic actions.
+            
+        Returns:
+            Dict with actions, action distribution inputs, action log probs, and value predictions.
+        """
+        # Extract observations
+        obs = batch.get(Columns.OBS, batch)
+        
+        # Extract board and action mask
         board = obs["board"]
         action_mask = obs["action_mask"]
         
+        # Handle single observations vs batches
         if len(board.shape) == 3:
             board = board.unsqueeze(0)
             action_mask = action_mask.unsqueeze(0)
             
-        batch_size = board.shape[0]
-        features = self.features_extractor(board) + 1e-8
-        action_logits = self.policy_head(features)
+        # Extract features from board state
+        features = self.features_extractor(board)
         
-        # Apply action masking
+        # Get logits and apply action masking
+        action_logits = self.policy_head(features)
         action_mask = action_mask.to(action_logits.device)
         masked_logits = action_logits + (action_mask - 1) * 1e9  # Large negative for invalid actions
-        value = self.value_head(features).view(batch_size, 1)
+        
+        # Create categorical distribution for action sampling
+        dist = torch.distributions.Categorical(logits=masked_logits)
+        
+        # Sample actions or take deterministic actions based on exploration flag
+        if explore:
+            actions = dist.sample()
+        else:
+            actions = torch.argmax(masked_logits, dim=-1)
+            
+        # Compute value predictions
+        value = self.value_head(features).view(-1, 1)
         
         return {
-            Columns.ACTIONS: torch.distributions.Categorical(logits=masked_logits).sample(),
+            Columns.ACTIONS: actions,
             Columns.ACTION_DIST_INPUTS: masked_logits,
-            Columns.ACTION_LOGP: torch.distributions.Categorical(logits=masked_logits).log_prob(
-                torch.distributions.Categorical(logits=masked_logits).sample()
-            ),
+            Columns.ACTION_LOGP: dist.log_prob(actions),
             Columns.VF_PREDS: value
         }
 
@@ -256,26 +341,33 @@ def train(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    # In Ray 2.31.0, use a dictionary-based approach instead of RLModuleSpec
+    # Configure PPO with Ray 2.43.0 API conventions
     config = (
         PPOConfig()
         .environment("chess_env")
         .framework("torch")
+        # Resources configuration
         .resources(
-            num_gpus=driver_gpus,
-            num_cpus_for_main_process=8,
+            num_gpus_for_driver=driver_gpus,
+            num_cpus_for_driver=8,
         )
+        # Learner configuration
         .learners(
             num_learners=num_learners,
             num_gpus_per_learner=num_gpus_per_learner,
         )
+        # Environment runners configuration
         .env_runners(
             num_env_runners=num_env_runners,
             num_envs_per_env_runner=num_envs_per_env_runner,
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
-            sample_timeout_s=None,
+            remote_env_batch_wait_ms=0,
+            sample_collector_class=None,
+            sample_async=False,
+            explore=True,
         )
+        # Training configuration
         .training(
             train_batch_size_per_learner=4096,
             minibatch_size=256,
@@ -291,24 +383,15 @@ def train(args):
             kl_coeff=0.2,
             vf_share_layers=False,
         )
+        # Callback configuration
         .callbacks(ChessCombinedCallback)
-        # Manual dictionary-based configuration for RL module
-        # Configure RL module in to_dict() call below
-        .api_stack(
-            enable_rl_module_and_learner=True,
-            enable_env_runner_and_connector_v2=True
+        # Custom RL module configuration
+        .rl_module(
+            _enable_rl_module_api=True,
+            model_config_dict={},
+            module_class=ChessMaskingRLModule,
         )
-        .experimental(_validate_config=False)
     )
-
-    # Add RL module configuration to dict manually
-    config_dict = config.to_dict()
-    config_dict["rl_module"] = {
-        "module_class": ChessMaskingRLModule,
-        "observation_space": observation_space,
-        "action_space": action_space,
-        "model_config": {},
-    }
 
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
 
@@ -319,7 +402,7 @@ def train(args):
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=3,
-        config=config_dict,
+        config=config,
         resume="AUTO",
         restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
     )
@@ -341,32 +424,27 @@ def evaluate(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    # Use dictionary-based configuration for Ray 2.31.0
+    # Configure evaluation with Ray 2.43.0 API conventions
     config = (
         PPOConfig()
         .environment("chess_env")
         .framework("torch")
-        .resources(num_gpus=1 if args.device == "cuda" else 0)
-        .env_runners(num_env_runners=0, num_cpus_per_env_runner=1)
-        .exploration(explore=False)
-        .training(lambda_=0.95, num_sgd_iter=0)
-        .api_stack(
-            enable_rl_module_and_learner=True,
-            enable_env_runner_and_connector_v2=True
+        .resources(num_gpus_for_driver=1 if args.device == "cuda" else 0)
+        .env_runners(
+            num_env_runners=1, 
+            num_cpus_per_env_runner=1,
+            explore=False
         )
-        .experimental(_validate_config=False)
+        .training(lambda_=0.95, num_sgd_iter=0)
+        # Custom RL module configuration
+        .rl_module(
+            _enable_rl_module_api=True,
+            model_config_dict={},
+            module_class=ChessMaskingRLModule,
+        )
     )
-    
-    # Add RL module configuration directly to dict
-    config_dict = config.to_dict()
-    config_dict["rl_module"] = {
-        "module_class": ChessMaskingRLModule,
-        "observation_space": observation_space,
-        "action_space": action_space,
-        "model_config": {},
-    }
 
-    algo = PPO(config=config_dict)
+    algo = PPO(config=config)
     algo.restore(args.checkpoint)
 
     env = create_rllib_chess_env({})
