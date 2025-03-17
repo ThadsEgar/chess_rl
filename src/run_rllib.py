@@ -369,7 +369,7 @@ def train(args):
         .training(
             train_batch_size_per_learner=4096,
             minibatch_size=256,
-            num_sgd_iter=10,
+            num_epochs=1,
             lr=5e-5,
             grad_clip=1.0,
             gamma=1.0,
@@ -385,7 +385,6 @@ def train(args):
         .callbacks(ChessCombinedCallback)
         # Custom RL module configuration
         .rl_module(
-            enable_rl_module_and_learner=True,
             model_config_dict={},
             rl_module_spec=ChessMaskingRLModule,
         )
