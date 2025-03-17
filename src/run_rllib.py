@@ -32,6 +32,8 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.policy.sample_batch import SampleBatch
+# Ray RLlib constants for advantage calculation
+GAE_ADVANTAGES = "advantages"  # Use string constants instead of Postprocessing class
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -48,8 +50,13 @@ class DebugCallback(DefaultCallbacks):
         missing = [key for key in required_keys if key not in batch]
         if missing:
             print(f"Missing keys in batch: {missing}")
-        if SampleBatch.ADVANTAGES not in batch:
+        
+        # Use string constant instead of Postprocessing class
+        if "advantages" not in batch:
             print("Warning: ADVANTAGES missing from batch")
+            print(f"Config - gamma: {algorithm.config.get('gamma')}, lambda: {algorithm.config.get('lambda_')}")
+            print(f"Training config: {algorithm.config.get('training')}")
+        
         if SampleBatch.CUR_OBS not in batch:
             print("Warning: CUR_OBS missing from batch")
         if SampleBatch.NEXT_OBS not in batch:
@@ -374,42 +381,43 @@ def train(args):
         .framework("torch")
         # Resources configuration
         .resources(
-            num_gpus=driver_gpus,
-            num_cpus_for_main_process=8,
+            num_gpus_for_driver=driver_gpus,
+            num_cpus_for_driver=8,
         )
         # Learner configuration
         .learners(
             num_learners=num_learners,
             num_gpus_per_learner=num_gpus_per_learner,
         )
-        # Environment runners configuration
+        # Environment runners configuration with explicit advantage calculation settings
         .env_runners(
             num_env_runners=num_env_runners,
             num_envs_per_env_runner=num_envs_per_env_runner,
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
-            add_default_connectors_to_env_to_module_pipeline=True,  # Use default connectors including advantage calculation
-            add_default_connectors_to_module_to_env_pipeline=True,
-            sample_timeout_s=None,
+            rollout_fragment_length="auto",
+            batch_mode="complete_episodes",  # Critical for correct advantage calculation
+            preprocessor_pref=None,
         )
         # Training configuration
         .training(
             train_batch_size_per_learner=4096,
             minibatch_size=256,
-            num_epochs=1,
+            num_sgd_iter=1,
             lr=5e-5,
             grad_clip=1.0,
             gamma=1.0,
-            use_gae=True,
+            use_gae=True,  # Explicitly enable GAE
             lambda_=0.95,
             vf_loss_coeff=0.5,
             entropy_coeff=args.entropy_coeff,
             clip_param=0.2,
             kl_coeff=0.2,
             vf_share_layers=False,
-            add_default_connectors_to_learner_pipeline=True,
         )
-        # Callback configuration
+        # Turn off the new API stack completely to use the more stable classic implementation
+        .experimental(_enable_new_api_stack=False)
+        # Callback configuration 
         .callbacks(DebugCallback)
         # Custom RL module configuration
         .rl_module(
@@ -418,7 +426,25 @@ def train(args):
         )
     )
 
+    # Convert to dict to make manual edits for compatibility
+    config_dict = config.to_dict()
+    
+    # Explicitly set these parameters to ensure GAE calculation
+    config_dict.update({
+        "batch_mode": "complete_episodes",
+        "use_gae": True,
+        "lambda": 0.95,  # Lambda parameter for GAE
+        "gamma": 1.0,
+        "_enable_learner_api": False,
+        "_enable_rl_module_api": True,  # Keep RL module API enabled
+        "normalize_actions": False,
+        "preprocessor_pref": None,
+        "model": {},  # Empty model config, will use RL module
+        "create_env_on_driver": False,
+    })
+
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
+    print(f"PPO config keys: {list(config_dict.keys())}")
 
     # Using the newer Tuner API instead of the older tune.run
     tuner = tune.Tuner(
@@ -432,7 +458,7 @@ def train(args):
             storage_path=checkpoint_dir,
             verbose=3,
         ),
-        param_space=config,
+        param_space=config_dict,  # Use dict instead of config object
     )
     results = tuner.fit()
     
