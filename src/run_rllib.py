@@ -21,6 +21,7 @@ from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.core.models.base import ENCODER_OUT
 from ray.rllib.core.models.torch.base import TorchModel
+from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.env.base_env import BaseEnv
 from ray.rllib.policy import Policy
 from ray.rllib.utils.framework import try_import_torch
@@ -339,6 +340,14 @@ def train(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
+    # Create an RLModuleSpec instance
+    module_spec = RLModuleSpec(
+        module_class=ChessMaskingRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config_dict={},
+    )
+
     # Configure PPO with Ray 2.43.0 API conventions
     config = (
         PPOConfig()
@@ -386,7 +395,7 @@ def train(args):
         # Custom RL module configuration
         .rl_module(
             model_config_dict={},
-            rl_module_spec=ChessMaskingRLModule,
+            rl_module_spec=module_spec,
         )
     )
 
