@@ -150,29 +150,34 @@ def build_deepmind_learner_connector(
     4. Adding next observations for computing TD errors
     5. Generalized Advantage Estimation (GAE)
     """
+    # Create all connectors we want to use
+    connectors = [
+        # First, shape rewards based on player perspective
+        ChessRewardShapingConnector(),
+        
+        # Then, add one timestep to episodes for proper GAE calculation
+        AddOneTsToEpisodesAndTruncate(),
+        
+        # Next, add observations to the batch
+        AddObservationsFromEpisodesToBatch(),
+        
+        # Add next observations for TD learning
+        AddNextObservationsFromEpisodesToTrainBatch(),
+        
+        # Finally, compute GAE advantages (gamma and lambda set in training config)
+        GeneralAdvantageEstimation(
+            gamma=0.99,       # Discount factor
+            lambda_=0.95,     # GAE lambda parameter
+        )
+    ]
+    
+    # Initialize pipeline with all connectors
     pipeline = ConnectorPipelineV2(
         description="DeepMind-style connector pipeline with GAE",
         input_observation_space=input_observation_space,
         input_action_space=input_action_space,
+        connectors=connectors,  # Pass the connectors list directly
     )
-    
-    # First, shape rewards based on player perspective
-    pipeline.append(ChessRewardShapingConnector())
-    
-    # Then, add one timestep to episodes for proper GAE calculation
-    pipeline.append(AddOneTsToEpisodesAndTruncate())
-    
-    # Next, add observations to the batch
-    pipeline.append(AddObservationsFromEpisodesToBatch())
-    
-    # Add next observations for TD learning
-    pipeline.append(AddNextObservationsFromEpisodesToTrainBatch())
-    
-    # Finally, compute GAE advantages (gamma and lambda set in training config)
-    pipeline.append(GeneralAdvantageEstimation(
-        gamma=0.99,       # Discount factor
-        lambda_=0.95,     # GAE lambda parameter
-    ))
     
     return pipeline
 
