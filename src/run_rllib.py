@@ -412,8 +412,6 @@ def train(args):
             ),
             storage_path=checkpoint_dir,
             verbose=3,
-            resume="AUTO",
-            restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
         ),
         param_space=config,
     )
