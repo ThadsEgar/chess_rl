@@ -198,31 +198,28 @@ class ChessCombinedCallback(DefaultCallbacks):
         policies: Optional[Dict[PolicyID, Policy]] = None,
         **kwargs,
     ) -> None:
-        metrics = {
-            "white_win": 0.0,
-            "black_win": 0.0,
-            "draw": 0.0,
-            "checkmate": 0.0,
-            "stalemate": 0.0,
-        }
+        # Extract episode info from the last step
         infos = episode.get_infos()
         info = infos[-1] if infos else {}
-        if "outcome" in info:
-            outcome = info["outcome"]
-            if outcome == "white_win":
-                metrics["white_win"] = 1.0
-            elif outcome == "black_win":
-                metrics["black_win"] = 1.0
-            elif outcome == "draw":
-                metrics["draw"] = 1.0
-        if "termination_reason" in info:
-            reason = info["termination_reason"]
-            if reason == "checkmate":
-                metrics["checkmate"] = 1.0
-            elif reason == "stalemate":
-                metrics["stalemate"] = 1.0
-        for key, value in metrics.items():
-            episode.custom_metrics[key] = value
+        
+        # Calculate metrics based on episode outcome
+        white_win = 1.0 if info.get("outcome") == "white_win" else 0.0
+        black_win = 1.0 if info.get("outcome") == "black_win" else 0.0
+        draw = 1.0 if info.get("outcome") == "draw" else 0.0
+        checkmate = 1.0 if info.get("termination_reason") == "checkmate" else 0.0
+        stalemate = 1.0 if info.get("termination_reason") == "stalemate" else 0.0
+        
+        # Use the metrics_logger to properly record these metrics with a sliding window
+        if metrics_logger is not None:
+            # Each metric is logged with a sliding window of 100 episodes
+            metrics_logger.log_value("white_win", white_win, window=100)
+            metrics_logger.log_value("black_win", black_win, window=100)
+            metrics_logger.log_value("draw", draw, window=100)
+            metrics_logger.log_value("checkmate", checkmate, window=100)
+            metrics_logger.log_value("stalemate", stalemate, window=100)
+        else:
+            # Fallback to print if no metrics_logger available (shouldn't happen with newer RLlib)
+            print(f"Game outcome metrics (no metrics_logger available): white_win={white_win}, black_win={black_win}, draw={draw}, checkmate={checkmate}, stalemate={stalemate}")
 
 class ChessMaskingRLModule(TorchRLModule):
     def __init__(self, observation_space=None, action_space=None, model_config=None, inference_only=False, catalog_class=None, **kwargs):
