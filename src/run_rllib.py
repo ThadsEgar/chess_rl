@@ -370,6 +370,7 @@ def train(args):
             rollout_fragment_length="auto",
             batch_mode="complete_episodes",  # Critical for correct advantage calculation
             preprocessor_pref=None,
+            sample_timeout_s=None,
         )
         # Training configuration
         .training(
