@@ -346,8 +346,8 @@ def train(args):
         .framework("torch")
         # Resources configuration
         .resources(
-            num_gpus_for_driver=driver_gpus,
-            num_cpus_for_driver=8,
+            num_gpus=driver_gpus,
+            num_cpus_for_main_process=8,
         )
         # Learner configuration
         .learners(
@@ -407,69 +407,6 @@ def train(args):
 
     return analysis.best_checkpoint
 
-def evaluate(args):
-    if not args.checkpoint or not os.path.exists(args.checkpoint):
-        print(f"Error: Valid checkpoint path required for evaluation, got: {args.checkpoint}")
-        return
-
-    ray.init(ignore_reinit_error=True, include_dashboard=args.dashboard)
-    tune.register_env("chess_env", create_rllib_chess_env)
-
-    observation_space = gym.spaces.Dict({
-        "board": gym.spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
-        "action_mask": gym.spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32),
-        "white_to_move": gym.spaces.Discrete(2)
-    })
-    action_space = gym.spaces.Discrete(20480)
-
-    # Configure evaluation with Ray 2.43.0 API conventions
-    config = (
-        PPOConfig()
-        .environment("chess_env")
-        .framework("torch")
-        .resources(num_gpus_for_driver=1 if args.device == "cuda" else 0)
-        .env_runners(
-            num_env_runners=1, 
-            num_cpus_per_env_runner=1,
-            explore=False
-        )
-        .training(lambda_=0.95, num_sgd_iter=0)
-        # Custom RL module configuration
-        .rl_module(
-            _enable_rl_module_api=True,
-            model_config_dict={},
-            rl_module_spec=ChessMaskingRLModule,
-        )
-    )
-
-    algo = PPO(config=config)
-    algo.restore(args.checkpoint)
-
-    env = create_rllib_chess_env({})
-    num_episodes = 50
-    total_rewards = []
-    outcomes = {"white_win": 0, "black_win": 0, "draw": 0, "unknown": 0}
-
-    for episode in range(num_episodes):
-        obs, info = env.reset()
-        done = truncated = False
-        episode_reward = 0
-
-        while not (done or truncated):
-            action = algo.compute_single_action(obs, explore=False)
-            obs, reward, done, truncated, info = env.step(action)
-            episode_reward += reward
-            if args.render:
-                env.render()
-
-        outcomes[info.get("outcome", "unknown")] += 1
-        total_rewards.append(episode_reward)
-
-    print(f"Average Reward: {np.mean(total_rewards):.2f}")
-    print(f"Outcomes: {outcomes}")
-    env.close()
-    ray.shutdown()
-
 def main():
     parser = argparse.ArgumentParser(description="Chess RL training using RLlib")
     parser.add_argument("--mode", choices=["train", "eval"], default="train")
@@ -488,8 +425,5 @@ def main():
 
     if args.mode == "train":
         train(args)
-    else:
-        evaluate(args)
-
 if __name__ == "__main__":
     main()
