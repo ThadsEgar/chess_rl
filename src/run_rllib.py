@@ -182,7 +182,6 @@ class ChessMaskingRLModule(TorchRLModule):
         # Apply action masking
         masked_logits = action_logits + (action_mask - 1) * 1e9
         
-        # Make sure we include both value function and action distribution inputs
         return {
             Columns.VF_PREDS: value,
             Columns.ACTION_DIST_INPUTS: masked_logits
@@ -372,7 +371,6 @@ def train(args):
             num_gpus_per_env_runner=num_gpus_per_env_runner,
             add_default_connectors_to_env_to_module_pipeline=True,
             add_default_connectors_to_module_to_env_pipeline=True,
-            remote_env_batch_wait_ms=0,
             sample_timeout_s=None,
         )
         # Training configuration
