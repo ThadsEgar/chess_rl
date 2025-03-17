@@ -322,7 +322,11 @@ def create_rllib_chess_env(config):
 def create_postprocessing_connector(env):
     """Creates a connector pipeline that includes postprocessing for advantage calculation."""
     # Use PPO's built-in methods to create the connector pipeline with GAE
-    catalog = PPOCatalog()
+    catalog = PPOCatalog(
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        model_config_dict={}
+    )
     return catalog.build_env_to_module_connectors(
         env, 
         gamma=1.0,
