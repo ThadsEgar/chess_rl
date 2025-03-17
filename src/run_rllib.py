@@ -401,19 +401,26 @@ def train(args):
 
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
 
-    analysis = tune.run(
+    # Using the newer Tuner API instead of the older tune.run
+    tuner = tune.Tuner(
         "PPO",
-        stop={"training_iteration": args.max_iterations},
-        checkpoint_freq=25,
-        checkpoint_at_end=True,
-        storage_path=checkpoint_dir,
-        verbose=3,
-        config=config,
-        resume="AUTO",
-        restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
+        run_config=tune.RunConfig(
+            stop={"training_iteration": args.max_iterations},
+            checkpoint_config=tune.CheckpointConfig(
+                checkpoint_frequency=25,
+                checkpoint_at_end=True,
+            ),
+            storage_path=checkpoint_dir,
+            verbose=3,
+            resume="AUTO",
+            restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
+        ),
+        param_space=config,
     )
-
-    return analysis.best_checkpoint
+    results = tuner.fit()
+    
+    # Get the best checkpoint from the results
+    return results.get_best_result().checkpoint
 
 def main():
     parser = argparse.ArgumentParser(description="Chess RL training using RLlib")
