@@ -278,7 +278,7 @@ def train(args):
         )
         .training(
             train_batch_size_per_learner=4096,
-            minibatch_size=256,
+            train_batch_size=256,
             num_epochs=10,
             lr=5e-5,
             grad_clip=1.0,
