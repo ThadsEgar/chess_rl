@@ -32,8 +32,9 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.policy.sample_batch import SampleBatch
-# Ray RLlib constants for advantage calculation
-GAE_ADVANTAGES = "advantages"  # Use string constants instead of Postprocessing class
+from ray.rllib.algorithms.ppo.torch.ppo_torch_rl_module import PPOTorchRLModule
+from ray.rllib.models.torch.torch_distributions import TorchCategorical
+
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -42,28 +43,59 @@ import os
 # Framework-specific imports
 torch, nn = try_import_torch()
 
+# Constant for masking invalid actions
+MASK_VALUE = -1e9  # Large negative value to mask out invalid actions
+
 # Metrics-only callback
 class DebugCallback(DefaultCallbacks):
     def on_train_result(self, *, algorithm, batch, **kwargs):
+        # Print batch keys and PPO configuration for debugging
+        print(f"\n=== TRAINING DEBUG INFORMATION ===")
         print(f"Batch keys: {list(batch.keys())}")
+        print(f"Batch size: {len(batch) if batch else 'unknown'}")
+        
+        # Check for required keys
         required_keys = [SampleBatch.REWARDS, SampleBatch.VF_PREDS, SampleBatch.DONES, SampleBatch.OBS]
         missing = [key for key in required_keys if key not in batch]
         if missing:
-            print(f"Missing keys in batch: {missing}")
+            print(f"⚠️ Missing required keys in batch: {missing}")
         
-        # Use string constant instead of Postprocessing class
-        if "advantages" not in batch:
-            print("Warning: ADVANTAGES missing from batch")
-            print(f"Config - gamma: {algorithm.config.get('gamma')}, lambda: {algorithm.config.get('lambda_')}")
-            print(f"Training config: {algorithm.config.get('training')}")
-        
-        if SampleBatch.CUR_OBS not in batch:
-            print("Warning: CUR_OBS missing from batch")
-        if SampleBatch.NEXT_OBS not in batch:
-            print("Warning: NEXT_OBS missing from batch")
-        if SampleBatch.ACTIONS not in batch:
-            print("Warning: ACTIONS missing from batch")
-                  
+        # Check for advantages in the batch
+        if SampleBatch.ADVANTAGES in batch:
+            advantages = batch[SampleBatch.ADVANTAGES]
+            print(f"✓ ADVANTAGES found in batch - shape: {advantages.shape}")
+            if torch.is_tensor(advantages):
+                adv_stats = {
+                    "mean": advantages.mean().item(),
+                    "std": advantages.std().item() if advantages.numel() > 1 else 0,
+                    "min": advantages.min().item(),
+                    "max": advantages.max().item()
+                }
+            else:
+                import numpy as np
+                adv_stats = {
+                    "mean": np.mean(advantages),
+                    "std": np.std(advantages) if len(advantages) > 1 else 0,
+                    "min": np.min(advantages),
+                    "max": np.max(advantages)
+                }
+            print(f"Advantage stats: {adv_stats}")
+        else:
+            print(f"❌ ADVANTAGES missing from batch")
+            print(f"GAE config - gamma: {algorithm.config.get('gamma')}, lambda: {algorithm.config.get('lambda')}")
+            
+        # Check for other important keys
+        for key in [SampleBatch.CUR_OBS, SampleBatch.NEXT_OBS, SampleBatch.ACTIONS]:
+            if key not in batch:
+                print(f"⚠️ {key} missing from batch")
+                
+        # Print PPO config
+        print(f"Using PPO module: {algorithm.config.get('_enable_rl_module_api')}")
+        print(f"Batch mode: {algorithm.config.get('batch_mode')}")
+        print(f"GAE enabled: {algorithm.config.get('use_gae')}")
+        print(f"Lambda value: {algorithm.config.get('lambda')}")
+        print(f"=== END DEBUG INFORMATION ===\n")
+
 class ChessCombinedCallback(DefaultCallbacks):
     def on_episode_end(
         self,
@@ -102,21 +134,35 @@ class ChessCombinedCallback(DefaultCallbacks):
             # Fallback to print if no metrics_logger available (shouldn't happen with newer RLlib)
             print(f"Game outcome metrics (no metrics_logger available): white_win={white_win}, black_win={black_win}, draw={draw}, checkmate={checkmate}, stalemate={stalemate}")
 
-class ChessMaskingRLModule(TorchRLModule):
-    """RLModule that implements action masking for chess environment.
+class ChessMaskingPPOModule(PPOTorchRLModule):
+    """RLModule that extends PPOTorchRLModule and implements action masking for chess environment.
     
-    This RLModule handles action masking by using the action_mask provided
-    by the environment to mask out invalid actions.
+    This extends the default PPO torch module to handle action masking for the chess environment.
+    By inheriting from PPOTorchRLModule, we get proper advantage calculation while adding our masking logic.
     """
     
-    @override(TorchRLModule)
+    @override(PPOTorchRLModule)
+    def get_train_action_dist_cls(self):
+        return TorchCategorical
+
+    @override(PPOTorchRLModule)
+    def get_exploration_action_dist_cls(self):
+        return TorchCategorical
+
+    @override(PPOTorchRLModule)
+    def get_inference_action_dist_cls(self):
+        return TorchCategorical
+    
+    @override(PPOTorchRLModule)
     def setup(self):
         """Initialize neural network modules."""
+        # Extract observation space information
         self.board_shape = self.observation_space["board"].shape
         self.board_channels = self.board_shape[0]
         self.action_space_n = self.action_space.n
 
-        self.features_extractor = nn.Sequential(
+        # Create feature extractor
+        self.encoder = nn.Sequential(
             nn.Conv2d(self.board_channels, 128, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
@@ -129,138 +175,112 @@ class ChessMaskingRLModule(TorchRLModule):
             nn.ReLU(),
         )
         
-        self.policy_head = nn.Linear(832, self.action_space_n)
-        self.value_head = nn.Linear(832, 1)
-        
-    @override(TorchRLModule)
-    def _forward_inference(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Forward pass for inference (evaluation).
-        
-        Args:
-            batch: Input batch of observations with action masks.
-            
-        Returns:
-            Dict with action distribution inputs and value predictions.
-        """
-        return self._masked_forward(batch, explore=False)
+        # Policy and value function heads
+        self.pi = nn.Linear(832, self.action_space_n)
+        self.vf = nn.Linear(832, 1)
     
-    @override(TorchRLModule)
-    def _forward_exploration(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Forward pass for exploration (training data collection).
-        
-        Args:
-            batch: Input batch of observations with action masks.
-            
-        Returns:
-            Dict with action distribution inputs and value predictions.
-        """
-        return self._masked_forward(batch, explore=True)
-        
-    @override(TorchRLModule)
-    def _forward_train(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """Forward pass for training.
-        
-        Args:
-            batch: Input batch containing observations, action masks, actions, etc.
-            
-        Returns:
-            Dict with value function predictions for training.
-        """
-        # Extract observations from batch
-        obs = batch.get(Columns.OBS)
-        
-        # Handle observations during training (may have been processed by connectors)
-        if isinstance(obs, dict) and "board" in obs:
-            board = obs["board"]
-            # During training, action_mask might be in a different format due to connectors
-            if "action_mask" in obs:
-                action_mask = obs["action_mask"]
-            else:
-                # If action mask not directly available, we still need value predictions
-                action_mask = None
-        else:
-            # If observations have been flattened, we still need to compute values
-            board = obs
-            action_mask = None
-            
-        if len(board.shape) == 3:
-            board = board.unsqueeze(0)
-        
-        # Extract features from board state
-        features = self.features_extractor(board)
-        
-        # Compute value predictions (required for PPO training)
-        value = self.value_head(features).view(-1, 1)
-        
-        # If we don't have action masks, we just need to return value predictions
-        if action_mask is None:
-            return {
-                Columns.VF_PREDS: value
-            }
-            
-        # Otherwise, we compute policy outputs with masking
-        if len(action_mask.shape) == 1:
-            action_mask = action_mask.unsqueeze(0)
-            
-        action_mask = action_mask.to(features.device)
-        action_logits = self.policy_head(features)
-        
-        # Apply action masking
-        masked_logits = action_logits + (action_mask - 1) * 1e9
-        
-        return {
-            Columns.VF_PREDS: value,
-            Columns.ACTION_DIST_INPUTS: masked_logits
-        }
-    
-    def _masked_forward(self, batch: Dict[str, Any], explore: bool) -> Dict[str, Any]:
-        """Common forward pass implementation for both inference and exploration.
-        
-        Args:
-            batch: Input batch containing observations and action masks.
-            explore: Whether to use exploration or deterministic actions.
-            
-        Returns:
-            Dict with actions, action distribution inputs, action log probs, and value predictions.
-        """
-        # Extract observations
+    def _mask_action_dist_inputs(self, outputs, action_mask):
+        """Apply action masking to action distribution inputs."""
+        if Columns.ACTION_DIST_INPUTS in outputs and action_mask is not None:
+            # Get logits and apply action masking
+            logits = outputs[Columns.ACTION_DIST_INPUTS]
+            # Make sure mask is on the same device
+            action_mask = action_mask.to(logits.device)
+            # Adjust shape if necessary
+            if len(action_mask.shape) == 1 and len(logits.shape) > 1:
+                action_mask = action_mask.unsqueeze(0)
+            # Apply the mask
+            outputs[Columns.ACTION_DIST_INPUTS] = logits + (action_mask - 1) * MASK_VALUE
+        return outputs
+
+    @override(PPOTorchRLModule)
+    def _forward_inference(self, batch, **kwargs):
+        # Get observations
         obs = batch.get(Columns.OBS, batch)
-        
-        # Extract board and action mask
+        # Extract action mask
+        action_mask = obs.get("action_mask", None)
+        # Call parent class forward method
+        outputs = super()._forward_inference(batch, **kwargs)
+        # Apply masking
+        return self._mask_action_dist_inputs(outputs, action_mask)
+
+    @override(PPOTorchRLModule)
+    def _forward_exploration(self, batch, **kwargs):
+        # Get observations
+        obs = batch.get(Columns.OBS, batch)
+        # Extract action mask
+        action_mask = obs.get("action_mask", None)
+        # Call parent class forward method
+        outputs = super()._forward_exploration(batch, **kwargs)
+        # Apply masking
+        return self._mask_action_dist_inputs(outputs, action_mask)
+
+    @override(PPOTorchRLModule)
+    def _forward_train(self, batch, **kwargs):
+        # Get observations
+        obs = batch.get(Columns.OBS, batch)
+        # Extract action mask if available in this format
+        action_mask = obs.get("action_mask", None) if isinstance(obs, dict) else None
+        # Call parent class forward method
+        outputs = super()._forward_train(batch, **kwargs)
+        # Apply masking if we have a mask
+        if action_mask is not None:
+            return self._mask_action_dist_inputs(outputs, action_mask)
+        return outputs
+    
+    @override(PPOTorchRLModule)
+    def _forward(self, batch, **kwargs):
+        """Custom forward method to process board observations."""
+        # Extract board from observations
+        obs = batch.get(Columns.OBS, batch)
         board = obs["board"]
-        action_mask = obs["action_mask"]
         
         # Handle single observations vs batches
         if len(board.shape) == 3:
             board = board.unsqueeze(0)
-            action_mask = action_mask.unsqueeze(0)
             
-        # Extract features from board state
-        features = self.features_extractor(board)
+        # Extract features using encoder
+        features = self.encoder(board)
         
-        # Get logits and apply action masking
-        action_logits = self.policy_head(features)
-        action_mask = action_mask.to(action_logits.device)
-        masked_logits = action_logits + (action_mask - 1) * 1e9  # Large negative for invalid actions
+        # Create outputs dict
+        outputs = {}
         
-        # Create categorical distribution for action sampling
-        dist = torch.distributions.Categorical(logits=masked_logits)
+        # Policy head outputs
+        outputs[Columns.ACTION_DIST_INPUTS] = self.pi(features)
         
-        # Sample actions or take deterministic actions based on exploration flag
-        if explore:
-            actions = dist.sample()
+        # If action mask is available, apply it
+        if "action_mask" in obs:
+            action_mask = obs["action_mask"]
+            if len(action_mask.shape) == 1:
+                action_mask = action_mask.unsqueeze(0)
+            action_mask = action_mask.to(features.device)
+            # Apply masking
+            outputs[Columns.ACTION_DIST_INPUTS] = outputs[Columns.ACTION_DIST_INPUTS] + (action_mask - 1) * MASK_VALUE
+        
+        return outputs
+    
+    @override(PPOTorchRLModule)
+    def compute_values(self, batch, embeddings=None):
+        """Compute value function predictions."""
+        # Extract observations
+        obs = batch.get(Columns.OBS, batch)
+        
+        # Handle different observation formats
+        if isinstance(obs, dict) and "board" in obs:
+            board = obs["board"]
         else:
-            actions = torch.argmax(masked_logits, dim=-1)
+            board = obs
             
-        # Compute value predictions
-        value = self.value_head(features).view(-1, 1)
+        # Ensure proper batch dimension
+        if len(board.shape) == 3:
+            board = board.unsqueeze(0)
+            
+        # Extract features
+        features = self.encoder(board)
         
-        return {
-            Columns.ACTIONS: actions,
-            Columns.ACTION_DIST_INPUTS: masked_logits,
-            Columns.ACTION_LOGP: dist.log_prob(actions),
-            Columns.VF_PREDS: value
-        }
+        # Compute and return value predictions
+        values = self.vf(features).squeeze(-1)
+        return values
 
 def create_rllib_chess_env(config):
     env = ChessEnv()
@@ -368,7 +388,7 @@ def train(args):
 
     # Create an RLModuleSpec instance
     module_spec = RLModuleSpec(
-        module_class=ChessMaskingRLModule,
+        module_class=ChessMaskingPPOModule,
         observation_space=observation_space,
         action_space=action_space,
         model_config={},
@@ -381,15 +401,15 @@ def train(args):
         .framework("torch")
         # Resources configuration
         .resources(
-            num_gpus_for_driver=driver_gpus,
-            num_cpus_for_driver=8,
+            num_gpus=driver_gpus,
+            num_cpus_for_main_process=8,
         )
         # Learner configuration
         .learners(
             num_learners=num_learners,
             num_gpus_per_learner=num_gpus_per_learner,
         )
-        # Environment runners configuration with explicit advantage calculation settings
+        # Environment runners configuration
         .env_runners(
             num_env_runners=num_env_runners,
             num_envs_per_env_runner=num_envs_per_env_runner,
@@ -403,7 +423,7 @@ def train(args):
         .training(
             train_batch_size_per_learner=4096,
             minibatch_size=256,
-            num_sgd_iter=1,
+            num_epochs=1,
             lr=5e-5,
             grad_clip=1.0,
             gamma=1.0,
@@ -415,9 +435,7 @@ def train(args):
             kl_coeff=0.2,
             vf_share_layers=False,
         )
-        # Turn off the new API stack completely to use the more stable classic implementation
-        .experimental(_enable_new_api_stack=False)
-        # Callback configuration 
+        # Callback configuration
         .callbacks(DebugCallback)
         # Custom RL module configuration
         .rl_module(
@@ -426,25 +444,7 @@ def train(args):
         )
     )
 
-    # Convert to dict to make manual edits for compatibility
-    config_dict = config.to_dict()
-    
-    # Explicitly set these parameters to ensure GAE calculation
-    config_dict.update({
-        "batch_mode": "complete_episodes",
-        "use_gae": True,
-        "lambda": 0.95,  # Lambda parameter for GAE
-        "gamma": 1.0,
-        "_enable_learner_api": False,
-        "_enable_rl_module_api": True,  # Keep RL module API enabled
-        "normalize_actions": False,
-        "preprocessor_pref": None,
-        "model": {},  # Empty model config, will use RL module
-        "create_env_on_driver": False,
-    })
-
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
-    print(f"PPO config keys: {list(config_dict.keys())}")
 
     # Using the newer Tuner API instead of the older tune.run
     tuner = tune.Tuner(
@@ -458,7 +458,7 @@ def train(args):
             storage_path=checkpoint_dir,
             verbose=3,
         ),
-        param_space=config_dict,  # Use dict instead of config object
+        param_space=config,
     )
     results = tuner.fit()
     
