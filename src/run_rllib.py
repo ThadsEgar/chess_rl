@@ -32,7 +32,7 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.algorithms.ppo.ppo_catalog import PPOCatalog
+from ray.rllib.policy.sample_batch import Postprocessing  # For advantage calculation
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -390,9 +390,10 @@ def train(args):
             num_envs_per_env_runner=num_envs_per_env_runner,
             num_cpus_per_env_runner=num_cpus_per_env_runner,
             num_gpus_per_env_runner=num_gpus_per_env_runner,
-            add_default_connectors_to_env_to_module_pipeline=True,  # Don't add default connectors
+            add_default_connectors_to_env_to_module_pipeline=True,  # Use default connectors including advantage calculation
             add_default_connectors_to_module_to_env_pipeline=True,
             sample_timeout_s=None,
+            postprocess_inputs=True,  # Explicitly enable postprocessing (this is critical for advantages)
         )
         # Training configuration
         .training(
