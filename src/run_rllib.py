@@ -391,7 +391,6 @@ def train(args):
             add_default_connectors_to_env_to_module_pipeline=True,  # Use default connectors including advantage calculation
             add_default_connectors_to_module_to_env_pipeline=True,
             sample_timeout_s=None,
-            postprocess_inputs=True,  # Explicitly enable postprocessing (this is critical for advantages)
         )
         # Training configuration
         .training(
