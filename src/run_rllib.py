@@ -345,7 +345,7 @@ def train(args):
         module_class=ChessMaskingRLModule,
         observation_space=observation_space,
         action_space=action_space,
-        model_config_dict={},
+        model_config={},
     )
 
     # Configure PPO with Ray 2.43.0 API conventions
