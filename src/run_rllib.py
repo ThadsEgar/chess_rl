@@ -32,8 +32,7 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.policy.sample_batch import SampleBatch, Postprocessing
-from ray.rllib.connectors.env.to_module.postprocessing_connector import PostprocessingConnector
-from ray.rllib.connectors.connector_pipeline import ConnectorPipeline
+from ray.rllib.algorithms.ppo.ppo_catalog import PPOCatalog
 
 # Local imports
 from custom_gym.chess_gym import ChessEnv, ActionMaskWrapper
@@ -320,33 +319,17 @@ def create_rllib_chess_env(config):
 
     return DictObsWrapper(env)
 
-def create_postprocessing_connector(env) -> ConnectorPipeline:
+def create_postprocessing_connector(env):
     """Creates a connector pipeline that includes postprocessing for advantage calculation."""
-    from ray.rllib.connectors.env.to_module.observations_to_batch import ObservationsToBatchConnector
-    from ray.rllib.connectors.env.to_module.rewards_to_batch import RewardsToBatchConnector
-    from ray.rllib.connectors.env.to_module.terminateds_to_batch import TerminatedsToBatchConnector
-    from ray.rllib.connectors.env.to_module.truncateds_to_batch import TruncatedsToBatchConnector
-    from ray.rllib.connectors.env.to_module.infos_to_batch import InfosToBatchConnector
-
-    pipeline = ConnectorPipeline()
-    # Add default connectors
-    pipeline.append(ObservationsToBatchConnector())
-    pipeline.append(RewardsToBatchConnector())
-    pipeline.append(TerminatedsToBatchConnector())
-    pipeline.append(TruncatedsToBatchConnector())
-    pipeline.append(InfosToBatchConnector())
-    
-    # Add the postprocessing connector with GAE settings
-    pipeline.append(
-        PostprocessingConnector(
-            gamma=1.0,  # Match your gamma setting
-            lambda_=0.95,  # Match your lambda_ setting
-            use_gae=True,  # Explicitly enable GAE
-            use_critic=True  # Use the value function for advantage calculation
-        )
+    # Use PPO's built-in methods to create the connector pipeline with GAE
+    catalog = PPOCatalog()
+    return catalog.build_env_to_module_connectors(
+        env, 
+        gamma=1.0,
+        lambda_=0.95,
+        use_gae=True,
+        use_critic=True
     )
-    
-    return pipeline
 
 def train(args):
     if args.device == "cuda" and not args.force_cpu:
