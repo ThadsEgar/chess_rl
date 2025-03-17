@@ -408,7 +408,6 @@ def train(args):
         .learners(
             num_learners=num_learners,
             num_gpus_per_learner=num_gpus_per_learner,
-            connector_fn=build_deepmind_learner_connector,  # Use the DeepMind-style learner connector
         )
         .env_runners(
             num_env_runners=num_env_runners,
@@ -431,6 +430,7 @@ def train(args):
             clip_param=0.2,       # PPO clipping parameter
             kl_coeff=0.2,         # KL divergence coefficient
             vf_share_layers=False,
+            learner_connector=build_deepmind_learner_connector,  # Set learner connector correctly here
         )
         .callbacks(ChessCombinedCallback)
         .rl_module(rl_module_spec=rl_module_spec)
