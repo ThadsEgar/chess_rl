@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Chess Reinforcement Learning using Ray RLlib.
-This implementation uses RLlib's built-in distributed training capabilities with ConnectorV2 for reward adjustment.
+This implementation uses RLlib's built-in distributed training capabilities with environment-based reward shaping.
 """
 # Standard library imports
 import argparse
@@ -16,12 +16,6 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
-from ray.rllib.connectors.connector_v2 import ConnectorV2
-from ray.rllib.connectors.connector_pipeline_v2 import ConnectorPipelineV2
-from ray.rllib.connectors.learner.add_one_ts_to_episodes_and_truncate import AddOneTsToEpisodesAndTruncate
-from ray.rllib.connectors.common.add_observations_from_episodes_to_batch import AddObservationsFromEpisodesToBatch
-from ray.rllib.connectors.learner.add_next_observations_from_episodes_to_train_batch import AddNextObservationsFromEpisodesToTrainBatch
-from ray.rllib.connectors.learner.general_advantage_estimation import GeneralAdvantageEstimation
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.env.base_env import BaseEnv
@@ -60,130 +54,6 @@ from ray.tune.callback import _CallbackMeta
 
 # Framework-specific imports
 torch, nn = try_import_torch()
-
-# Custom ConnectorV2 for reward shaping
-class ChessRewardShapingConnector(ConnectorV2):
-    """Shapes rewards based on player perspective for chess environment."""
-    
-    def __call__(
-        self,
-        *,
-        rl_module: RLModule,
-        episodes: List[EpisodeType] = None,
-        **kwargs,
-    ) -> dict:
-        """
-        Shape rewards according to player perspective.
-        - White's rewards stay as-is
-        - Black's rewards are flipped (multiplied by -1)
-        """
-        # Extract batch from kwargs - this avoids the 'multiple values' issue
-        # by not having an explicit 'batch' parameter
-        batch = kwargs.get('data', {})
-        
-        # Handle empty batch 
-        if not batch or "rewards" not in batch:
-            return batch
-        
-        rewards = batch["rewards"]
-        if len(rewards) == 0:
-            return batch
-            
-        # Create a mask to identify which steps belong to black (odd indices)
-        # Since we're not directly tracking player turns in the batch,
-        # we'll use a heuristic based on step indices within episodes
-        shaped_rewards = rewards.copy()
-        
-        # Process each episode
-        if episodes:
-            for episode in episodes:
-                # Get the episode's rewards
-                episode_rewards = episode.rewards
-                
-                # Shape rewards based on player turns (even indices for white, odd for black)
-                for i in range(len(episode_rewards)):
-                    player = i % 2  # 0 for White, 1 for Black
-                    
-                    # For black's rewards, flip the sign for non-terminal states
-                    if player == 1 and i < len(episode_rewards) - 1:
-                        episode_rewards[i] = -episode_rewards[i]
-                
-                # Shape terminal rewards if the episode is done
-                if episode.length > 0 and (episode.terminated[-1] or episode.truncated[-1]):
-                    last_idx = episode.length - 1
-                    info = episode.infos[last_idx] if episode.infos else {}
-                    
-                    if "outcome" in info:
-                        outcome = info["outcome"]
-                        last_player = last_idx % 2  # 0 for White, 1 for Black
-                        
-                        if outcome == "white_win":
-                            episode_rewards[last_idx] = 1.0 if last_player == 0 else -1.0
-                            if last_idx > 0:
-                                # Previous player lost
-                                episode_rewards[last_idx - 1] = -1.0 if last_player == 0 else 1.0
-                        elif outcome == "black_win":
-                            episode_rewards[last_idx] = 1.0 if last_player == 1 else -1.0
-                            if last_idx > 0:
-                                # Previous player lost
-                                episode_rewards[last_idx - 1] = -1.0 if last_player == 1 else 1.0
-                        elif outcome == "draw":
-                            episode_rewards[last_idx] = 0.0
-                            if last_idx > 0:
-                                episode_rewards[last_idx - 1] = 0.0
-        
-        # Update the batch with shaped rewards from episodes
-        if "rewards" in batch:
-            batch["rewards"] = shaped_rewards
-        return batch
-
-# Define the DeepMind-style learner connector pipeline with GAE
-def build_deepmind_learner_connector(
-    input_observation_space=None,
-    input_action_space=None,
-    device=None,
-):
-    """
-    Build a DeepMind-style learner connector pipeline.
-    
-    This includes:
-    1. Reward shaping for chess (white/black perspectives)
-    2. Adding one timestep to episodes for proper GAE
-    3. Adding observations from episodes to the batch
-    4. Adding next observations for computing TD errors
-    5. Generalized Advantage Estimation (GAE)
-    """
-    # Create pipeline description
-    description = "DeepMind-style connector pipeline with GAE"
-    
-    # Initialize empty pipeline
-    pipeline = ConnectorPipelineV2(
-        description=description,
-        input_observation_space=input_observation_space,
-        input_action_space=input_action_space,
-        connectors=[],  # Start with empty connectors list
-    )
-    
-    # Add connectors one by one to the pipeline
-    # 1. First, add reward shaping for chess
-    pipeline.append(ChessRewardShapingConnector())
-    
-    # 2. Then, add one timestep to episodes for proper GAE calculation
-    pipeline.append(AddOneTsToEpisodesAndTruncate())
-    
-    # 3. Next, add observations to the batch
-    pipeline.append(AddObservationsFromEpisodesToBatch())
-    
-    # 4. Add next observations for TD learning
-    pipeline.append(AddNextObservationsFromEpisodesToTrainBatch())
-    
-    # 5. Finally, compute GAE advantages with specified parameters
-    pipeline.append(GeneralAdvantageEstimation(
-        gamma=0.99,       # Discount factor
-        lambda_=0.95,     # GAE lambda parameter
-    ))
-    
-    return pipeline
 
 # Metrics-only callback
 class ChessCombinedCallback(DefaultCallbacks):
@@ -313,15 +183,10 @@ def create_rllib_chess_env(config):
             obs, reward, terminated, truncated, info = self.env.step(action)
             #print(f"Raw step result - reward: {reward}, terminated: {terminated}, info: {info}")
             
-            # Shape the reward based on player perspective
-            player = (self.steps - 1) % 2  # 0 for White, 1 for Black
-            shaped_reward = reward
+            # Terminal-only rewards with player perspective flipping
+            shaped_reward = 0.0  # No intermediate rewards
             
-            # For intermediate rewards: White as-is, Black flipped
-            if player == 1 and not terminated:  # Black's turn, non-terminal
-                shaped_reward = -reward
-                
-            # For terminal rewards
+            # Only assign rewards at termination
             if terminated and "outcome" in info:
                 outcome = info["outcome"]
                 last_player = (self.steps - 1) % 2  # 0 for White, 1 for Black
@@ -424,7 +289,7 @@ def train(args):
             num_epochs=10,
             lr=5e-5,
             grad_clip=1.0,
-            gamma=0.99,           # Discount factor for GAE
+            gamma=1.0,            # No discounting - equal weight for all moves
             use_gae=True,         # Enable GAE
             lambda_=0.95,         # GAE lambda parameter
             vf_loss_coeff=0.5,    # Value function loss coefficient
@@ -432,7 +297,7 @@ def train(args):
             clip_param=0.2,       # PPO clipping parameter
             kl_coeff=0.2,         # KL divergence coefficient
             vf_share_layers=False,
-            learner_connector=build_deepmind_learner_connector,  # Set learner connector correctly here
+            # Using default connectors - no custom connector specified
         )
         .callbacks(ChessCombinedCallback)
         .rl_module(rl_module_spec=rl_module_spec)
