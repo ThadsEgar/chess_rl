@@ -107,7 +107,7 @@ class ChessMaskingRLModule(TorchRLModule):
         self.value_head = nn.Linear(832, 1)
         
     @override(TorchRLModule)
-    def _forward_inference(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+    def _forward_inference(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Forward pass for inference (evaluation).
         
         Args:
@@ -119,7 +119,7 @@ class ChessMaskingRLModule(TorchRLModule):
         return self._masked_forward(batch, explore=False)
     
     @override(TorchRLModule)
-    def _forward_exploration(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+    def _forward_exploration(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Forward pass for exploration (training data collection).
         
         Args:
@@ -131,7 +131,7 @@ class ChessMaskingRLModule(TorchRLModule):
         return self._masked_forward(batch, explore=True)
         
     @override(TorchRLModule)
-    def _forward_train(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+    def _forward_train(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Forward pass for training.
         
         Args:
