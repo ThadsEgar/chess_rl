@@ -16,7 +16,7 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
-from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.env.base_env import BaseEnv
 from ray.rllib.models import ModelCatalog
@@ -36,7 +36,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
 
-from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.env.base_env import BaseEnv
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.evaluation.episode_v2 import EpisodeV2
@@ -257,13 +256,7 @@ def train(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    rl_module_spec = RLModuleSpec(
-        module_class=ChessMaskingRLModule,
-        observation_space=observation_space,
-        action_space=action_space,
-        model_config={},
-    )
-
+    # In Ray 2.31.0, we use the module_class directly in the config.rl_module() call
     config = (
         PPOConfig()
         .environment("chess_env")
@@ -297,14 +290,22 @@ def train(args):
             clip_param=0.2,       # PPO clipping parameter
             kl_coeff=0.2,         # KL divergence coefficient
             vf_share_layers=False,
-            # No learner_connector needed - using older system for advantage calculation
         )
         .callbacks(ChessCombinedCallback)
-        .rl_module(rl_module_spec=rl_module_spec)
+        # Ray 2.31.0 style RL module configuration
+        .rl_module(
+            module_class=ChessMaskingRLModule,
+            observation_space=observation_space,
+            action_space=action_space,
+            model_config={},
+        )
+        # Use the new API stack fully
         .api_stack(
             enable_rl_module_and_learner=True,
-            enable_env_runner_and_connector_v2=False  # Disable the V2 connector system
+            enable_env_runner_and_connector_v2=True
         )
+        # Disable config validation to avoid version-specific issues
+        .experimental(_validate_config=False)
     )
 
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
@@ -338,25 +339,26 @@ def evaluate(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    rl_module_spec = RLModuleSpec(
-        module_class=ChessMaskingRLModule,
-        observation_space=observation_space,
-        action_space=action_space,
-    )
-
+    # Ray 2.31.0 style configuration
     config = (
         PPOConfig()
         .environment("chess_env")
         .framework("torch")
         .resources(num_gpus=1 if args.device == "cuda" else 0)
         .env_runners(num_env_runners=0, num_cpus_per_env_runner=1)
-        .rl_module(rl_module_spec=rl_module_spec)
+        .rl_module(
+            module_class=ChessMaskingRLModule,
+            observation_space=observation_space,
+            action_space=action_space,
+            model_config={},
+        )
         .exploration(explore=False)
         .training(lambda_=0.95, num_epochs=0)
         .api_stack(
             enable_rl_module_and_learner=True,
-            enable_env_runner_and_connector_v2=False  # Disable the V2 connector system
+            enable_env_runner_and_connector_v2=True
         )
+        .experimental(_validate_config=False)
     )
 
     algo = PPO(config=config)
