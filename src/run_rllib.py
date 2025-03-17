@@ -18,7 +18,6 @@ from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
-from ray.rllib.core.rl_module.rl_module_spec import SingleAgentRLModuleSpec
 from ray.rllib.env.base_env import BaseEnv
 from ray.rllib.models import ModelCatalog
 from ray.rllib.policy import Policy
@@ -257,15 +256,7 @@ def train(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    # Create RLModuleSpec with our custom module class
-    rl_module_spec = SingleAgentRLModuleSpec(
-        module_class=ChessMaskingRLModule,
-        observation_space=observation_space,
-        action_space=action_space,
-        model_config_dict={}
-    )
-
-    # In Ray 2.31.0, we use RLModuleSpec in the config.rl_module() call
+    # In Ray 2.31.0, use a dictionary-based approach instead of RLModuleSpec
     config = (
         PPOConfig()
         .environment("chess_env")
@@ -288,42 +279,47 @@ def train(args):
         .training(
             train_batch_size_per_learner=4096,
             minibatch_size=256,
-            num_sgd_iter=10,  # Changed from num_epochs to num_sgd_iter
+            num_sgd_iter=10,
             lr=5e-5,
             grad_clip=1.0,
-            gamma=1.0,            # No discounting - equal weight for all moves
-            use_gae=True,         # Enable GAE
-            lambda_=0.95,         # GAE lambda parameter
-            vf_loss_coeff=0.5,    # Value function loss coefficient
+            gamma=1.0,
+            use_gae=True,
+            lambda_=0.95,
+            vf_loss_coeff=0.5,
             entropy_coeff=args.entropy_coeff,
-            clip_param=0.2,       # PPO clipping parameter
-            kl_coeff=0.2,         # KL divergence coefficient
+            clip_param=0.2,
+            kl_coeff=0.2,
             vf_share_layers=False,
         )
         .callbacks(ChessCombinedCallback)
-        # Ray 2.31.0 style RL module configuration
-        .rl_module(
-            rl_module_spec=rl_module_spec
-        )
-        # Use the new API stack fully
+        # Manual dictionary-based configuration for RL module
+        # Configure RL module in to_dict() call below
         .api_stack(
             enable_rl_module_and_learner=True,
             enable_env_runner_and_connector_v2=True
         )
-        # Disable config validation to avoid version-specific issues
         .experimental(_validate_config=False)
     )
+
+    # Add RL module configuration to dict manually
+    config_dict = config.to_dict()
+    config_dict["rl_module"] = {
+        "module_class": ChessMaskingRLModule,
+        "observation_space": observation_space,
+        "action_space": action_space,
+        "model_config": {},
+    }
 
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
 
     analysis = tune.run(
-        "PPO",  # Use default PPO since CustomPPO was for old API debugging
+        "PPO",
         stop={"training_iteration": args.max_iterations},
         checkpoint_freq=25,
         checkpoint_at_end=True,
         storage_path=checkpoint_dir,
         verbose=3,
-        config=config.to_dict(),  # Convert to dict for tune.run
+        config=config_dict,
         resume="AUTO",
         restore=args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None,
     )
@@ -345,24 +341,13 @@ def evaluate(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    # Create RLModuleSpec with our custom module class
-    rl_module_spec = SingleAgentRLModuleSpec(
-        module_class=ChessMaskingRLModule,
-        observation_space=observation_space,
-        action_space=action_space,
-        model_config_dict={}
-    )
-
-    # Ray 2.31.0 style configuration
+    # Use dictionary-based configuration for Ray 2.31.0
     config = (
         PPOConfig()
         .environment("chess_env")
         .framework("torch")
         .resources(num_gpus=1 if args.device == "cuda" else 0)
         .env_runners(num_env_runners=0, num_cpus_per_env_runner=1)
-        .rl_module(
-            rl_module_spec=rl_module_spec
-        )
         .exploration(explore=False)
         .training(lambda_=0.95, num_sgd_iter=0)
         .api_stack(
@@ -371,8 +356,17 @@ def evaluate(args):
         )
         .experimental(_validate_config=False)
     )
+    
+    # Add RL module configuration directly to dict
+    config_dict = config.to_dict()
+    config_dict["rl_module"] = {
+        "module_class": ChessMaskingRLModule,
+        "observation_space": observation_space,
+        "action_space": action_space,
+        "model_config": {},
+    }
 
-    algo = PPO(config=config)
+    algo = PPO(config=config_dict)
     algo.restore(args.checkpoint)
 
     env = create_rllib_chess_env({})
