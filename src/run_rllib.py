@@ -346,7 +346,7 @@ def train(args):
         .framework("torch")
         # Resources configuration
         .resources(
-            num_gpus_for_driver=driver_gpus,
+            num_cpus_for_main_process=driver_gpus,
             num_cpus_for_driver=8,
         )
         # Learner configuration
