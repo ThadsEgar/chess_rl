@@ -57,7 +57,7 @@ class ChessCombinedCallback(DefaultCallbacks):
         infos = episode.get_infos()
         info = infos[-1] if infos else {}
         if "batch" in kwargs:
-            print(f"Episode info: {kwargs['batch']}")
+            print(f"Batch info: {kwargs['batch']}")
         print(f"Episode info: {episode}")
         
         # Calculate metrics based on episode outcome
