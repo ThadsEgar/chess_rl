@@ -69,8 +69,8 @@ class ChessRewardShapingConnector(ConnectorV2):
         self,
         *,
         rl_module: RLModule,
-        batch: Dict[str, Any],
-        episodes: List[EpisodeType],
+        batch: Dict[str, Any] = None,
+        episodes: List[EpisodeType] = None,
         explore: Optional[bool] = None,
         shared_data: Optional[dict] = None,
         metrics: Optional[MetricsLogger] = None,
@@ -81,6 +81,12 @@ class ChessRewardShapingConnector(ConnectorV2):
         - White's rewards stay as-is
         - Black's rewards are flipped (multiplied by -1)
         """
+        # Get batch from either explicit parameter or kwargs
+        # This handles the case where 'batch' might be passed as 'data' by the pipeline
+        if batch is None and 'data' in kwargs:
+            batch = kwargs.get('data')
+        
+        # Handle empty batch 
         if not batch or "rewards" not in batch:
             return batch
         
@@ -305,9 +311,9 @@ def create_rllib_chess_env(config):
 
         def step(self, action):
             self.steps += 1
-            print(f"Step {self.steps}, action: {action}")
+            #print(f"Step {self.steps}, action: {action}")
             obs, reward, terminated, truncated, info = self.env.step(action)
-            print(f"Raw step result - reward: {reward}, terminated: {terminated}, info: {info}")
+            #print(f"Raw step result - reward: {reward}, terminated: {terminated}, info: {info}")
             
             # Shape the reward based on player perspective
             player = (self.steps - 1) % 2  # 0 for White, 1 for Black
@@ -329,19 +335,15 @@ def create_rllib_chess_env(config):
                 elif outcome == "draw":
                     shaped_reward = 0.0
             
-            print(f"Shaped reward: {shaped_reward} (original: {reward})")
+            #print(f"Shaped reward: {shaped_reward} (original: {reward})")
             wrapped_obs = self._wrap_observation(obs)
-            print(f"Wrapped obs type: {type(wrapped_obs)}")
+            #print(f"Wrapped obs type: {type(wrapped_obs)}")
             return wrapped_obs, shaped_reward, terminated, truncated, info
 
         def _wrap_observation(self, obs):
             if not isinstance(obs, dict) or "board" not in obs or "action_mask" not in obs:
-                print(f"Warning: Invalid observation format: {type(obs)}")
-                return {
-                    "board": np.zeros((13, 8, 8), dtype=np.float32),
-                    "action_mask": np.ones(self.action_space.n, dtype=np.float32),
-                    "white_to_move": 1
-                }
+                #print(f"Warning: Invalid observation format: {type(obs)}")
+                raise ValueError(f"Invalid observation format: {type(obs)}")
             return {
                 "board": np.asarray(obs["board"], dtype=np.float32),
                 "action_mask": np.asarray(obs["action_mask"], dtype=np.float32),
