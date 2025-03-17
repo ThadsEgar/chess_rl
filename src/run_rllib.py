@@ -66,62 +66,76 @@ class ChessRewardShapingConnector(ConnectorV2):
     """Shapes rewards based on player perspective for chess environment."""
     
     def __call__(
-            self,
-            *,
-            rl_module: RLModule,
-            data: Dict[str, Any],
-            episodes: List[Any],  # EpisodeType is a placeholder; adjust based on your RLlib version
-            explore: Optional[bool] = None,
-            shared_data: Optional[dict] = None,
-            **kwargs
-        ) -> Dict[str, Any]:
-            """
-            Shape rewards according to player perspective.
-            - White's rewards stay as-is.
-            - Black's rewards are flipped (multiplied by -1).
-            """
-            # Check if data is valid
-            if not data or "rewards" not in data:
-                return data
+        self,
+        *,
+        rl_module: RLModule,
+        episodes: List[EpisodeType] = None,
+        **kwargs,
+    ) -> dict:
+        """
+        Shape rewards according to player perspective.
+        - White's rewards stay as-is
+        - Black's rewards are flipped (multiplied by -1)
+        """
+        # Extract batch from kwargs - this avoids the 'multiple values' issue
+        # by not having an explicit 'batch' parameter
+        batch = kwargs.get('data', {})
+        
+        # Handle empty batch 
+        if not batch or "rewards" not in batch:
+            return batch
+        
+        rewards = batch["rewards"]
+        if len(rewards) == 0:
+            return batch
             
-            rewards = data["rewards"]
-            if len(rewards) == 0:
-                return data
-                
-            shaped_rewards = rewards.copy()
-            
-            # Process each episode to shape rewards
+        # Create a mask to identify which steps belong to black (odd indices)
+        # Since we're not directly tracking player turns in the batch,
+        # we'll use a heuristic based on step indices within episodes
+        shaped_rewards = rewards.copy()
+        
+        # Process each episode
+        if episodes:
             for episode in episodes:
+                # Get the episode's rewards
                 episode_rewards = episode.rewards
+                
+                # Shape rewards based on player turns (even indices for white, odd for black)
                 for i in range(len(episode_rewards)):
                     player = i % 2  # 0 for White, 1 for Black
-                    # Flip Black's rewards for non-terminal states
+                    
+                    # For black's rewards, flip the sign for non-terminal states
                     if player == 1 and i < len(episode_rewards) - 1:
                         episode_rewards[i] = -episode_rewards[i]
                 
-                # Handle terminal rewards
+                # Shape terminal rewards if the episode is done
                 if episode.length > 0 and (episode.terminated[-1] or episode.truncated[-1]):
                     last_idx = episode.length - 1
                     info = episode.infos[last_idx] if episode.infos else {}
+                    
                     if "outcome" in info:
                         outcome = info["outcome"]
                         last_player = last_idx % 2  # 0 for White, 1 for Black
+                        
                         if outcome == "white_win":
                             episode_rewards[last_idx] = 1.0 if last_player == 0 else -1.0
                             if last_idx > 0:
+                                # Previous player lost
                                 episode_rewards[last_idx - 1] = -1.0 if last_player == 0 else 1.0
                         elif outcome == "black_win":
                             episode_rewards[last_idx] = 1.0 if last_player == 1 else -1.0
                             if last_idx > 0:
+                                # Previous player lost
                                 episode_rewards[last_idx - 1] = -1.0 if last_player == 1 else 1.0
                         elif outcome == "draw":
                             episode_rewards[last_idx] = 0.0
                             if last_idx > 0:
                                 episode_rewards[last_idx - 1] = 0.0
-            
-            # Update the data dictionary with shaped rewards
-            data["rewards"] = shaped_rewards
-            return data
+        
+        # Update the batch with shaped rewards from episodes
+        if "rewards" in batch:
+            batch["rewards"] = shaped_rewards
+        return batch
 
 # Define the DeepMind-style learner connector pipeline with GAE
 def build_deepmind_learner_connector(
@@ -129,20 +143,46 @@ def build_deepmind_learner_connector(
     input_action_space=None,
     device=None,
 ):
-    connectors = [
-        ChessRewardShapingConnector(),
-        AddOneTsToEpisodesAndTruncate(),
-        AddObservationsFromEpisodesToBatch(),
-        AddNextObservationsFromEpisodesToTrainBatch(),
-        GeneralAdvantageEstimation(gamma=0.99, lambda_=0.95)
-    ]
+    """
+    Build a DeepMind-style learner connector pipeline.
     
+    This includes:
+    1. Reward shaping for chess (white/black perspectives)
+    2. Adding one timestep to episodes for proper GAE
+    3. Adding observations from episodes to the batch
+    4. Adding next observations for computing TD errors
+    5. Generalized Advantage Estimation (GAE)
+    """
+    # Create pipeline description
+    description = "DeepMind-style connector pipeline with GAE"
+    
+    # Initialize empty pipeline
     pipeline = ConnectorPipelineV2(
-        description="DeepMind-style connector pipeline with GAE",
+        description=description,
         input_observation_space=input_observation_space,
         input_action_space=input_action_space,
-        connectors=connectors,
+        connectors=[],  # Start with empty connectors list
     )
+    
+    # Add connectors one by one to the pipeline
+    # 1. First, add reward shaping for chess
+    pipeline.append(ChessRewardShapingConnector())
+    
+    # 2. Then, add one timestep to episodes for proper GAE calculation
+    pipeline.append(AddOneTsToEpisodesAndTruncate())
+    
+    # 3. Next, add observations to the batch
+    pipeline.append(AddObservationsFromEpisodesToBatch())
+    
+    # 4. Add next observations for TD learning
+    pipeline.append(AddNextObservationsFromEpisodesToTrainBatch())
+    
+    # 5. Finally, compute GAE advantages with specified parameters
+    pipeline.append(GeneralAdvantageEstimation(
+        gamma=0.99,       # Discount factor
+        lambda_=0.95,     # GAE lambda parameter
+    ))
+    
     return pipeline
 
 # Metrics-only callback
