@@ -34,6 +34,7 @@ from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.algorithms.ppo.torch.ppo_torch_rl_module import PPOTorchRLModule
 from ray.rllib.models.torch.torch_distributions import TorchCategorical
+from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
 
 # Local imports
@@ -283,14 +284,15 @@ def create_rllib_chess_env(config):
     
     # Use the global WHITE and BLACK constants
     
-    class ChessMultiAgentWrapper(gym.Wrapper):
+    class ChessMultiAgentWrapper(MultiAgentEnv):
         """MultiAgent wrapper for chess environment.
         
         This wrapper converts a standard chess environment into a multi-agent environment
         where white and black are separate agents taking turns.
         """
         def __init__(self, env):
-            super().__init__(env)
+            super().__init__()
+            self.env = env
             # Define observation spaces for each agent
             self.observation_space = gym.spaces.Dict({
                 "board": gym.spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
@@ -305,6 +307,20 @@ def create_rllib_chess_env(config):
             # Define agent IDs
             self.agents = [WHITE, BLACK]
             self.possible_agents = self.agents.copy()
+            self._agent_ids = set(self.agents)
+
+        def get_agent_ids(self):
+            """Return a set of agent ids in the environment."""
+            return self._agent_ids
+            
+        @property
+        def agent_ids(self):
+            """Legacy support for older RLlib versions."""
+            return self._agent_ids
+            
+        def get_reset_agent_ids(self):
+            """Return a set of agent ids that need a reset in the environment."""
+            return {WHITE}  # Always start with WHITE agent after reset
 
         def reset(self, **kwargs):
             self.steps = 0
@@ -458,85 +474,64 @@ def train(args):
     )
 
     # Define the policy mapping function for multi-agent
-    def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+    def policy_mapping_fn(agent_id, episode=None, worker=None, **kwargs):
+        """Map agent_id to policy_id."""
         # We'll use the same policy for both agents (self-play)
         return "shared_policy"
 
-    # Configure PPO with Ray 2.43.0 API conventions and multi-agent support
-    config = (
-        PPOConfig()
-        .environment("chess_env")
-        .framework("torch")
-        # Resources configuration
-        .resources(
-            num_gpus=driver_gpus,
-            num_cpus_for_main_process=8,
-        )
-        # Learner configuration
-        .learners(
-            num_learners=num_learners,
-            num_gpus_per_learner=num_gpus_per_learner,
-        )
-        # Environment runners configuration
-        .env_runners(
-            num_env_runners=num_env_runners,
-            num_envs_per_env_runner=num_envs_per_env_runner,
-            num_cpus_per_env_runner=num_cpus_per_env_runner,
-            num_gpus_per_env_runner=num_gpus_per_env_runner,
-            rollout_fragment_length="auto",
-            batch_mode="complete_episodes",  # Critical for correct advantage calculation
-            preprocessor_pref=None,
-            sample_timeout_s=300,  # Increase timeout for complex chess environment
-        )
-        # Training configuration
-        .training(
-            train_batch_size_per_learner=4096,
-            minibatch_size=256,
-            num_epochs=1,  # In Ray 2.43.0, this replaces num_epochs
-            lr=5e-5,
-            grad_clip=1.0,
-            gamma=1.0,
-            use_gae=True,  # Explicitly enable GAE
-            lambda_=0.95,
-            vf_loss_coeff=0.5,
-            entropy_coeff=args.entropy_coeff,
-            clip_param=0.2,
-            kl_coeff=0.2,
-            vf_share_layers=False,
-        )
-        # Callback configuration
-        .callbacks(ChessCombinedCallback)
-        # Multi-agent configuration
-        .multi_agent(
-            policies={
+    # Configure PPO for multi-agent learning
+    config = {
+        # === Environment settings ===
+        "env": "chess_env",
+        "framework": "torch",
+        
+        # === Resource configuration ===
+        "num_gpus": driver_gpus,
+        "num_cpus_for_driver": 8,
+        
+        # === Rollout settings ===
+        "rollout_fragment_length": 1000,
+        "batch_mode": "complete_episodes",
+        "sample_async": False,
+        "sample_timeout_s": 300,  # Increase timeout for complex chess environment
+        
+        # === Training settings ===
+        "train_batch_size": 4096,
+        "sgd_minibatch_size": 256,
+        "num_sgd_iter": 1,
+        "lr": 5e-5,
+        "grad_clip": 1.0,
+        "gamma": 1.0,
+        "use_gae": True,
+        "lambda": 0.95,
+        "vf_loss_coeff": 0.5,
+        "entropy_coeff": args.entropy_coeff,
+        "clip_param": 0.2,
+        "kl_coeff": 0.2,
+        
+        # === Multi-agent configuration ===
+        "multiagent": {
+            "policies": {
                 "shared_policy": (
                     None,  # Policy class (None = use default)
                     observation_space,
                     action_space,
-                    {},  # Configuration dict
-                    module_spec,  # RLModuleSpec for this policy
+                    {"rl_module_spec": module_spec},  # Policy config with module spec
                 ),
             },
-            policy_mapping_fn=policy_mapping_fn,
-            policies_to_train=["shared_policy"],
-        )
-    )
-
-    # Convert config to dict and add explicit settings for advantage calculation
-    config_dict = config.to_dict()
-    
-    # Ensure these parameters are explicitly set for GAE calculation
-    config_dict.update({
-        "batch_mode": "complete_episodes",
-        "use_gae": True,
-        "lambda": 0.95,
-        "gamma": 1.0,
+            "policy_mapping_fn": policy_mapping_fn,
+            "policies_to_train": ["shared_policy"],
+        },
+        
+        # === Callbacks ===
+        "callbacks": ChessCombinedCallback,
+        
+        # === API flags ===
         "_enable_rl_module_api": True,
-        "sample_async": False,  # Synchronous sampling for more stability
-    })
+    }
 
-    print(f"Training with {num_learners} learners, {num_env_runners} env runners")
-    print(f"Multi-agent configuration: {config_dict.get('multiagent', {})}")
+    print(f"Training with multi-agent configuration")
+    print(f"Policies: {list(config['multiagent']['policies'].keys())}")
 
     # Using the newer Tuner API instead of the older tune.run
     tuner = tune.Tuner(
@@ -550,7 +545,7 @@ def train(args):
             storage_path=checkpoint_dir,
             verbose=3,
         ),
-        param_space=config_dict,  # Use dict instead of config object
+        param_space=config,
     )
     results = tuner.fit()
     
