@@ -46,9 +46,47 @@ torch, nn = try_import_torch()
 # Constant for masking invalid actions
 MASK_VALUE = -1e9  # Large negative value to mask out invalid actions
 
-# Metrics-only callback
+# Define agent IDs for white and black players (global constants)
+WHITE = "white"
+BLACK = "black"
 
-class ChessCombinedCallback(DefaultCallbacks):
+# Metrics-only callback
+class MultiAgentDebugCallback(DefaultCallbacks):
+    def on_train_result(self, *, algorithm, result, **kwargs):
+        # Print training metrics
+        print(f"\n=== MULTI-AGENT TRAINING DEBUG ===")
+        print(f"Training iteration: {result['training_iteration']}")
+        
+        # Check for policy-specific metrics
+        if "policy_reward_mean" in result:
+            for policy_id, reward in result["policy_reward_mean"].items():
+                print(f"Policy {policy_id} - Mean reward: {reward:.4f}")
+        
+        # Check for episode-level metrics
+        if "episode_len_mean" in result:
+            print(f"Mean episode length: {result['episode_len_mean']:.2f}")
+        
+        # Print advantage info if available
+        if "info" in result and "learner" in result["info"]:
+            for policy_id, stats in result["info"]["learner"].items():
+                if "stats" in stats and "vf_explained_var" in stats["stats"]:
+                    print(f"Policy {policy_id} - Value function explained variance: {stats['stats']['vf_explained_var']:.4f}")
+                    print(f"This indicates how well advantages are being calculated (closer to 1.0 is better)")
+        
+        print(f"=== END MULTI-AGENT DEBUG ===\n")
+    
+    def on_episode_end(self, *, episode, **kwargs):
+        # Extract episode info from the last step
+        rewards = {agent_id: episode.agent_rewards.get(agent_id, 0) for agent_id in episode.get_agents()}
+        print(f"Episode {episode.episode_id} ended with rewards: {rewards}")
+        
+        # Check for specific outcomes
+        if len(episode.get_last_infos()) > 0:
+            for agent_id, info in episode.get_last_infos().items():
+                if "agent_outcome" in info:
+                    print(f"Agent {agent_id} outcome: {info['agent_outcome']}")
+
+class ChessCombinedCallback(MultiAgentDebugCallback):
     def on_episode_end(
         self,
         *,
@@ -60,31 +98,36 @@ class ChessCombinedCallback(DefaultCallbacks):
         rl_module: Optional[RLModule] = None,
         **kwargs,
     ) -> None:
+        # Call parent method for debug info
+        super().on_episode_end(episode=episode, **kwargs)
+        
         # Extract episode info from the last step
-        infos = episode.get_infos()
-        info = infos[-1] if infos else {}
-        if "batch" in kwargs:
-            print(f"Batch info: {kwargs['batch']}")
-        print(f"Episode info: {episode}")
+        agent_infos = episode.get_last_infos()
         
-        # Calculate metrics based on episode outcome
-        white_win = 1.0 if info.get("outcome") == "white_win" else 0.0
-        black_win = 1.0 if info.get("outcome") == "black_win" else 0.0
-        draw = 1.0 if info.get("outcome") == "draw" else 0.0
-        checkmate = 1.0 if info.get("termination_reason") == "checkmate" else 0.0
-        stalemate = 1.0 if info.get("termination_reason") == "stalemate" else 0.0
-        
-        # Use the metrics_logger to properly record these metrics with a sliding window
-        if metrics_logger is not None:
-            # Each metric is logged with a sliding window of 100 episodes
-            metrics_logger.log_value("white_win", white_win, window=100)
-            metrics_logger.log_value("black_win", black_win, window=100)
-            metrics_logger.log_value("draw", draw, window=100)
-            metrics_logger.log_value("checkmate", checkmate, window=100)
-            metrics_logger.log_value("stalemate", stalemate, window=100)
-        else:
-            # Fallback to print if no metrics_logger available (shouldn't happen with newer RLlib)
-            print(f"Game outcome metrics (no metrics_logger available): white_win={white_win}, black_win={black_win}, draw={draw}, checkmate={checkmate}, stalemate={stalemate}")
+        # Track metrics for each agent
+        for agent_id, info in agent_infos.items():
+            # Skip non-agent keys
+            if agent_id not in [WHITE, BLACK]:
+                continue
+                
+            # Calculate metrics based on agent outcome
+            win = 1.0 if info.get("agent_outcome") == "win" else 0.0
+            loss = 1.0 if info.get("agent_outcome") == "loss" else 0.0
+            draw = 1.0 if info.get("agent_outcome") == "draw" else 0.0
+            
+            # Use the metrics_logger to properly record these metrics with a sliding window
+            if metrics_logger is not None:
+                # Each metric is logged with a sliding window of 100 episodes
+                metrics_logger.log_value(f"{agent_id}_win", win, window=100)
+                metrics_logger.log_value(f"{agent_id}_loss", loss, window=100)
+                metrics_logger.log_value(f"{agent_id}_draw", draw, window=100)
+                
+                # Track game stats
+                if "termination_reason" in info:
+                    checkmate = 1.0 if info["termination_reason"] == "checkmate" else 0.0
+                    stalemate = 1.0 if info["termination_reason"] == "stalemate" else 0.0
+                    metrics_logger.log_value("checkmate", checkmate, window=100)
+                    metrics_logger.log_value("stalemate", stalemate, window=100)
 
 class ChessMaskingPPOModule(PPOTorchRLModule):
     """RLModule that extends PPOTorchRLModule and implements action masking for chess environment.
@@ -238,9 +281,17 @@ def create_rllib_chess_env(config):
     env = ChessEnv()
     env = ActionMaskWrapper(env)
     
-    class DictObsWrapper(gym.Wrapper):
+    # Use the global WHITE and BLACK constants
+    
+    class ChessMultiAgentWrapper(gym.Wrapper):
+        """MultiAgent wrapper for chess environment.
+        
+        This wrapper converts a standard chess environment into a multi-agent environment
+        where white and black are separate agents taking turns.
+        """
         def __init__(self, env):
             super().__init__(env)
+            # Define observation spaces for each agent
             self.observation_space = gym.spaces.Dict({
                 "board": gym.spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
                 "action_mask": gym.spaces.Box(low=0, high=1, shape=(env.action_space.n,), dtype=np.float32),
@@ -248,41 +299,100 @@ def create_rllib_chess_env(config):
             })
             self.action_space = env.action_space
             self.steps = 0
-            print(f"DictObsWrapper initialized with action space: {self.action_space}")
+            self.current_agent = WHITE  # Start with white
+            print(f"ChessMultiAgentWrapper initialized with action space: {self.action_space}")
+            
+            # Define agent IDs
+            self.agents = [WHITE, BLACK]
+            self.possible_agents = self.agents.copy()
 
         def reset(self, **kwargs):
             self.steps = 0
-            print(f"Environment reset")
+            self.current_agent = WHITE  # Reset to white's turn
+            print(f"Environment reset - Current agent: {self.current_agent}")
             obs, info = self.env.reset(**kwargs)
             wrapped_obs = self._wrap_observation(obs)
-            print(f"Reset obs: {type(wrapped_obs)}, info: {info}")
-            return wrapped_obs, info
+            
+            # Create a multi-agent format dictionary with observations only for the current agent
+            multi_agent_obs = {
+                self.current_agent: wrapped_obs
+            }
+            multi_agent_info = {
+                self.current_agent: info
+            }
+            
+            return multi_agent_obs, multi_agent_info
 
-        def step(self, action):
+        def step(self, action_dict):
+            # Extract action for the current agent
+            action = action_dict[self.current_agent]
             self.steps += 1
-            #print(f"Step {self.steps}, action: {action}")
+            
+            # Take a step in the environment
             obs, reward, terminated, truncated, info = self.env.step(action)
-            #print(f"Raw step result - reward: {reward}, terminated: {terminated}, info: {info}")
             
             # Terminal-only rewards with player perspective flipping
-            shaped_reward = 0.0  # No intermediate rewards
+            white_reward = 0.0
+            black_reward = 0.0
             
             # Only assign rewards at termination
             if terminated and "outcome" in info:
                 outcome = info["outcome"]
-                last_player = (self.steps - 1) % 2  # 0 for White, 1 for Black
                 
                 if outcome == "white_win":
-                    shaped_reward = 1.0 if last_player == 0 else -1.0
+                    white_reward = 1.0
+                    black_reward = -1.0
                 elif outcome == "black_win":
-                    shaped_reward = 1.0 if last_player == 1 else -1.0
+                    white_reward = -1.0
+                    black_reward = 1.0
                 elif outcome == "draw":
-                    shaped_reward = 0.0
+                    white_reward = 0.0
+                    black_reward = 0.0
             
-            #print(f"Shaped reward: {shaped_reward} (original: {reward})")
+            # Switch the current agent
+            next_agent = BLACK if self.current_agent == WHITE else WHITE
+            self.current_agent = next_agent
+            
+            # Wrap observation for the next agent if the game is not over
             wrapped_obs = self._wrap_observation(obs)
-            #print(f"Wrapped obs type: {type(wrapped_obs)}")
-            return wrapped_obs, shaped_reward, terminated, truncated, info
+            
+            # Create multi-agent formatted outputs
+            # Only include the next agent in observations if the game is not terminated
+            multi_agent_obs = {}
+            if not terminated and not truncated:
+                multi_agent_obs[self.current_agent] = wrapped_obs
+            
+            # Assign rewards to both agents
+            multi_agent_reward = {
+                WHITE: white_reward,
+                BLACK: black_reward
+            }
+            
+            # Create termination and truncation dicts
+            multi_agent_terminated = {
+                WHITE: terminated,
+                BLACK: terminated,
+                "__all__": terminated  # Required by RLlib
+            }
+            
+            multi_agent_truncated = {
+                WHITE: truncated,
+                BLACK: truncated,
+                "__all__": truncated  # Required by RLlib
+            }
+            
+            # Create info dict for both agents
+            multi_agent_info = {
+                WHITE: info.copy(),
+                BLACK: info.copy()
+            }
+            
+            # Add agent-specific information
+            if "outcome" in info:
+                multi_agent_info[WHITE]["agent_outcome"] = "win" if info["outcome"] == "white_win" else "loss" if info["outcome"] == "black_win" else "draw"
+                multi_agent_info[BLACK]["agent_outcome"] = "win" if info["outcome"] == "black_win" else "loss" if info["outcome"] == "white_win" else "draw"
+            
+            return multi_agent_obs, multi_agent_reward, multi_agent_terminated, multi_agent_truncated, multi_agent_info
 
         def _wrap_observation(self, obs):
             if not isinstance(obs, dict) or "board" not in obs or "action_mask" not in obs:
@@ -294,7 +404,7 @@ def create_rllib_chess_env(config):
                 "white_to_move": int(obs.get("white_to_move", 1))
             }
 
-    return DictObsWrapper(env)
+    return ChessMultiAgentWrapper(env)
 
 def train(args):
     if args.device == "cuda" and not args.force_cpu:
@@ -331,6 +441,7 @@ def train(args):
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Define the observation and action spaces for the agents
     observation_space = gym.spaces.Dict({
         "board": gym.spaces.Box(low=0, high=1, shape=(13, 8, 8), dtype=np.float32),
         "action_mask": gym.spaces.Box(low=0, high=1, shape=(20480,), dtype=np.float32),
@@ -338,7 +449,7 @@ def train(args):
     })
     action_space = gym.spaces.Discrete(20480)
 
-    # Create an RLModuleSpec instance
+    # Create an RLModuleSpec instance for our masked PPO module
     module_spec = RLModuleSpec(
         module_class=ChessMaskingPPOModule,
         observation_space=observation_space,
@@ -346,7 +457,12 @@ def train(args):
         model_config={},
     )
 
-    # Configure PPO with Ray 2.43.0 API conventions
+    # Define the policy mapping function for multi-agent
+    def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+        # We'll use the same policy for both agents (self-play)
+        return "shared_policy"
+
+    # Configure PPO with Ray 2.43.0 API conventions and multi-agent support
     config = (
         PPOConfig()
         .environment("chess_env")
@@ -370,13 +486,13 @@ def train(args):
             rollout_fragment_length="auto",
             batch_mode="complete_episodes",  # Critical for correct advantage calculation
             preprocessor_pref=None,
-            sample_timeout_s=None,
+            sample_timeout_s=300,  # Increase timeout for complex chess environment
         )
         # Training configuration
         .training(
             train_batch_size_per_learner=4096,
             minibatch_size=256,
-            num_epochs=1,
+            num_epochs=1,  # In Ray 2.43.0, this replaces num_epochs
             lr=5e-5,
             grad_clip=1.0,
             gamma=1.0,
@@ -390,14 +506,37 @@ def train(args):
         )
         # Callback configuration
         .callbacks(ChessCombinedCallback)
-        # Custom RL module configuration
-        .rl_module(
-            model_config_dict={},
-            rl_module_spec=module_spec,
+        # Multi-agent configuration
+        .multi_agent(
+            policies={
+                "shared_policy": (
+                    None,  # Policy class (None = use default)
+                    observation_space,
+                    action_space,
+                    {},  # Configuration dict
+                    module_spec,  # RLModuleSpec for this policy
+                ),
+            },
+            policy_mapping_fn=policy_mapping_fn,
+            policies_to_train=["shared_policy"],
         )
     )
 
+    # Convert config to dict and add explicit settings for advantage calculation
+    config_dict = config.to_dict()
+    
+    # Ensure these parameters are explicitly set for GAE calculation
+    config_dict.update({
+        "batch_mode": "complete_episodes",
+        "use_gae": True,
+        "lambda": 0.95,
+        "gamma": 1.0,
+        "_enable_rl_module_api": True,
+        "sample_async": False,  # Synchronous sampling for more stability
+    })
+
     print(f"Training with {num_learners} learners, {num_env_runners} env runners")
+    print(f"Multi-agent configuration: {config_dict.get('multiagent', {})}")
 
     # Using the newer Tuner API instead of the older tune.run
     tuner = tune.Tuner(
@@ -411,7 +550,7 @@ def train(args):
             storage_path=checkpoint_dir,
             verbose=3,
         ),
-        param_space=config,
+        param_space=config_dict,  # Use dict instead of config object
     )
     results = tuner.fit()
     
